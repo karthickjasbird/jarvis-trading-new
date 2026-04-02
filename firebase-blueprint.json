@@ -1,0 +1,85 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role", "createdAt"]
+    },
+    "BrokerConfig": {
+      "title": "BrokerConfig",
+      "description": "Secure storage for broker API keys (Private)",
+      "type": "object",
+      "properties": {
+        "brokerName": { "type": "string", "enum": ["zerodha", "binance", "paper"] },
+        "apiKey": { "type": "string" },
+        "apiSecret": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["brokerName", "apiKey", "apiSecret", "isActive", "updatedAt"]
+    },
+    "Trade": {
+      "title": "Trade",
+      "description": "Record of a trade executed by Jarvis",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "symbol": { "type": "string" },
+        "market": { "type": "string", "enum": ["crypto", "indian_equity", "indian_options"] },
+        "side": { "type": "string", "enum": ["buy", "sell"] },
+        "quantity": { "type": "number" },
+        "entryPrice": { "type": "number" },
+        "exitPrice": { "type": "number" },
+        "status": { "type": "string", "enum": ["open", "closed", "cancelled"] },
+        "pnl": { "type": "number" },
+        "mode": { "type": "string", "enum": ["copilot", "sentry"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "closedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "symbol", "market", "side", "quantity", "entryPrice", "status", "mode", "createdAt"]
+    },
+    "StrategyConfig": {
+      "title": "StrategyConfig",
+      "description": "Sentry Mode configuration for a user",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "sentryModeActive": { "type": "boolean" },
+        "maxDailyLoss": { "type": "number" },
+        "targetDailyProfit": { "type": "number" },
+        "allowedMarkets": { 
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "sentryModeActive", "maxDailyLoss", "targetDailyProfit", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Public user profiles"
+    },
+    "/users/{userId}/brokerConfigs/{configId}": {
+      "schema": { "$ref": "#/entities/BrokerConfig" },
+      "description": "Private broker API keys"
+    },
+    "/trades/{tradeId}": {
+      "schema": { "$ref": "#/entities/Trade" },
+      "description": "Global trade history"
+    },
+    "/strategies/{userId}": {
+      "schema": { "$ref": "#/entities/StrategyConfig" },
+      "description": "User strategy configurations"
+    }
+  }
+}

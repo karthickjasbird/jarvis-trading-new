@@ -1,0 +1,5 @@
+{
+  "name": "Jarvis AI",
+  "description": "A personal AI assistant with voice wake-up, screen vision, and long-term memory.",
+  "requestFramePermissions": ["microphone", "camera", "geolocation"]
+}
