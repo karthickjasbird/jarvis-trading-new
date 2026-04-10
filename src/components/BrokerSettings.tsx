@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, getDocs, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, getDocs, addDoc, deleteDoc, doc, updateDoc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import { User } from 'firebase/auth';
-import { Key, Plus, Trash2, CheckCircle2, XCircle, ShieldCheck } from 'lucide-react';
+import { Settings, Key, Plus, Trash2, CheckCircle2, XCircle, ShieldCheck, Send, Palette, Brain } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface BrokerConfig {
@@ -16,6 +16,11 @@ interface BrokerConfig {
   lastLogin?: string;
 }
 
+interface NotificationConfig {
+  telegramChatId: string;
+  enabled: boolean;
+}
+
 const BROKERS = [
   { id: 'zerodha', name: 'Zerodha (Kite Connect)', type: 'indian_equity' },
   { id: 'upstox', name: 'Upstox', type: 'indian_equity' },
@@ -24,15 +29,60 @@ const BROKERS = [
   { id: 'paper', name: 'Paper Trading (Simulator)', type: 'simulator' }
 ];
 
-export function BrokerSettings({ user, onClose }: { user: User, onClose: () => void }) {
+type OrbVariant = 'hologram' | 'liquid' | 'ethereal';
+
+export function BrokerSettings({ 
+  user, 
+  onClose,
+  personality,
+  setPersonality,
+  orbVariant,
+  setOrbVariant
+}: { 
+  user: User, 
+  onClose: () => void,
+  personality?: 'classic' | 'sarcastic' | 'scientific',
+  setPersonality?: (p: 'classic' | 'sarcastic' | 'scientific') => void,
+  orbVariant?: OrbVariant,
+  setOrbVariant?: (v: OrbVariant) => void
+}) {
   const [configs, setConfigs] = useState<BrokerConfig[]>([]);
+  const [notificationConfig, setNotificationConfig] = useState<NotificationConfig>({ telegramChatId: '', enabled: false });
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newConfig, setNewConfig] = useState({ brokerName: 'zerodha', apiKey: '', apiSecret: '' });
+  const [activeTab, setActiveTab] = useState<'brokers' | 'notifications' | 'preferences'>('brokers');
 
   useEffect(() => {
     fetchConfigs();
+    fetchNotificationConfig();
   }, [user]);
+
+  const fetchNotificationConfig = async () => {
+    try {
+      const docRef = doc(db, 'notificationConfigs', user.uid);
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        setNotificationConfig(snap.data() as NotificationConfig);
+      }
+    } catch (error) {
+      console.error("Error fetching notification config:", error);
+    }
+  };
+
+  const saveNotificationConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await setDoc(doc(db, 'notificationConfigs', user.uid), {
+        ...notificationConfig,
+        updatedAt: new Date().toISOString()
+      });
+      toast.success("Notification settings saved!");
+    } catch (error) {
+      console.error("Error saving notification config:", error);
+      toast.error("Failed to save notification settings");
+    }
+  };
 
   const fetchConfigs = async () => {
     try {
@@ -143,11 +193,11 @@ export function BrokerSettings({ user, onClose }: { user: User, onClose: () => v
         <div className="sticky top-0 bg-zinc-900/95 backdrop-blur border-b border-zinc-800 p-6 flex items-center justify-between z-10">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-blue-500/10 rounded-lg">
-              <ShieldCheck className="w-6 h-6 text-blue-400" />
+              <Settings className="w-6 h-6 text-blue-400" />
             </div>
             <div>
-              <h2 className="text-xl font-bold text-zinc-100">The Vault (API Keys)</h2>
-              <p className="text-sm text-zinc-400">Securely connect Jarvis to your brokers</p>
+              <h2 className="text-xl font-bold text-zinc-100">Settings</h2>
+              <p className="text-sm text-zinc-400">Manage connections, notifications, and preferences</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-zinc-400">
@@ -155,10 +205,31 @@ export function BrokerSettings({ user, onClose }: { user: User, onClose: () => v
           </button>
         </div>
 
+        <div className="flex border-b border-zinc-800">
+          <button
+            onClick={() => setActiveTab('brokers')}
+            className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'brokers' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            Broker APIs
+          </button>
+          <button
+            onClick={() => setActiveTab('notifications')}
+            className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'notifications' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            Notifications
+          </button>
+          <button
+            onClick={() => setActiveTab('preferences')}
+            className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'preferences' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            Preferences
+          </button>
+        </div>
+
         <div className="p-6">
           {loading ? (
-            <div className="text-center py-8 text-zinc-400 animate-pulse">Decrypting vault...</div>
-          ) : (
+            <div className="text-center py-8 text-zinc-400 animate-pulse">Loading settings...</div>
+          ) : activeTab === 'brokers' ? (
             <div className="space-y-6">
               {configs.length === 0 && !showAddForm ? (
                 <div className="text-center py-12 border-2 border-dashed border-zinc-800 rounded-xl">
@@ -294,6 +365,117 @@ export function BrokerSettings({ user, onClose }: { user: User, onClose: () => v
                   </div>
                 </form>
               )}
+            </div>
+          ) : activeTab === 'notifications' ? (
+            <div className="space-y-6">
+              <form onSubmit={saveNotificationConfig} className="bg-zinc-800/30 border border-zinc-700 rounded-xl p-6 space-y-6">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="p-2 bg-blue-500/10 rounded-lg">
+                    <Send className="w-6 h-6 text-blue-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-medium text-zinc-200">Telegram Notifications</h3>
+                    <p className="text-sm text-zinc-400">Get instant alerts when Jarvis executes trades</p>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-900/50 p-4 rounded-lg border border-zinc-800">
+                  <h4 className="text-sm font-medium text-zinc-300 mb-2">How to connect:</h4>
+                  <ol className="list-decimal list-inside text-sm text-zinc-400 space-y-1">
+                    <li>Message <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">@userinfobot</a> on Telegram</li>
+                    <li>Type <code>/start</code> to get your Chat ID</li>
+                    <li>Paste the ID below</li>
+                  </ol>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-zinc-400 mb-1">Telegram Chat ID</label>
+                  <input 
+                    type="text"
+                    value={notificationConfig.telegramChatId}
+                    onChange={(e) => setNotificationConfig({...notificationConfig, telegramChatId: e.target.value})}
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200 focus:outline-none focus:border-blue-500 font-mono text-sm"
+                    placeholder="e.g. 123456789"
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <input 
+                    type="checkbox"
+                    id="enableTelegram"
+                    checked={notificationConfig.enabled}
+                    onChange={(e) => setNotificationConfig({...notificationConfig, enabled: e.target.checked})}
+                    className="w-5 h-5 rounded border-zinc-700 bg-zinc-900 text-blue-500 focus:ring-blue-500/50 focus:ring-offset-zinc-950"
+                  />
+                  <label htmlFor="enableTelegram" className="text-sm font-medium text-zinc-300">Enable Telegram Alerts</label>
+                </div>
+
+                <button 
+                  type="submit"
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+                >
+                  <CheckCircle2 className="w-5 h-5" />
+                  Save Notification Settings
+                </button>
+              </form>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div className="bg-zinc-800/30 border border-zinc-700 rounded-xl p-6 space-y-6">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 bg-blue-500/10 rounded-lg">
+                    <Brain className="w-6 h-6 text-blue-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-medium text-zinc-200">Agent Personality</h3>
+                    <p className="text-sm text-zinc-400">How should Jarvis communicate with you?</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  {(['classic', 'sarcastic', 'scientific'] as const).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPersonality?.(p)}
+                      className={`p-3 rounded-lg border text-sm font-medium capitalize transition-all ${
+                        personality === p
+                          ? 'bg-blue-500/20 border-blue-500 text-blue-400'
+                          : 'bg-zinc-900/50 border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300'
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-zinc-800/30 border border-zinc-700 rounded-xl p-6 space-y-6">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 bg-blue-500/10 rounded-lg">
+                    <Palette className="w-6 h-6 text-blue-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-medium text-zinc-200">Visual Style</h3>
+                    <p className="text-sm text-zinc-400">Customize the appearance of the Jarvis Orb</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  {(['hologram', 'liquid', 'ethereal'] as const).map((v) => (
+                    <button
+                      key={v}
+                      onClick={() => setOrbVariant?.(v)}
+                      className={`p-3 rounded-lg border text-sm font-medium capitalize transition-all ${
+                        orbVariant === v
+                          ? 'bg-blue-500/20 border-blue-500 text-blue-400'
+                          : 'bg-zinc-900/50 border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300'
+                      }`}
+                    >
+                      {v}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
         </div>

@@ -13,3 +13,16 @@
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+@keyframes ghost-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(168, 85, 247, 0.7); }
+  70% { box-shadow: 0 0 0 15px rgba(168, 85, 247, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(168, 85, 247, 0); }
+}
+
+@utility ghost-highlight {
+  animation: ghost-pulse 1.5s infinite;
+  border-color: #a855f7 !important;
+  box-shadow: 0 0 20px rgba(168, 85, 247, 0.5);
+  transition: all 0.3s ease;
+}

@@ -68,6 +68,40 @@ service cloud.firestore {
              data.updatedAt is string;
     }
 
+    function isValidSentryConfig(data) {
+      return data.keys().hasOnly(['active', 'maxDailyLoss', 'targetDailyProfit', 'updatedAt', 'lastTriggered', 'triggerReason']) &&
+             data.active is bool &&
+             data.updatedAt is string &&
+             (!('maxDailyLoss' in data) || data.maxDailyLoss is number) &&
+             (!('targetDailyProfit' in data) || data.targetDailyProfit == null || data.targetDailyProfit is number) &&
+             (!('lastTriggered' in data) || data.lastTriggered is string) &&
+             (!('triggerReason' in data) || data.triggerReason is string);
+    }
+
+    function isValidRiskSettings(data) {
+      return data.keys().hasOnly(['maxDailyLoss', 'maxPositionSizePct', 'autoLiquidateThreshold', 'requireConfirmation', 'updatedAt']) &&
+             data.maxDailyLoss is number && data.maxDailyLoss >= 0 &&
+             data.maxPositionSizePct is number && data.maxPositionSizePct > 0 && data.maxPositionSizePct <= 100 &&
+             data.autoLiquidateThreshold is number && data.autoLiquidateThreshold >= 0 &&
+             data.requireConfirmation is bool &&
+             (!('updatedAt' in data) || data.updatedAt is string);
+    }
+
+    function isValidNotificationConfig(data) {
+      return data.keys().hasOnly(['telegramChatId', 'enabled', 'updatedAt']) &&
+             data.enabled is bool &&
+             (!('telegramChatId' in data) || data.telegramChatId is string) &&
+             (!('updatedAt' in data) || data.updatedAt is string);
+    }
+
+    function isValidPortfolio(data) {
+      return data.keys().hasOnly(['userId', 'paperBalance', 'realizedPnl', 'updatedAt']) &&
+             data.userId is string &&
+             data.paperBalance is number &&
+             data.realizedPnl is number &&
+             data.updatedAt is string;
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -97,6 +131,30 @@ service cloud.firestore {
       allow read: if isOwner(userId) || isAdmin();
       allow create: if isOwner(userId) && isValidStrategy(request.resource.data) && request.resource.data.userId == request.auth.uid;
       allow update: if isOwner(userId) && isValidStrategy(request.resource.data) && resource.data.userId == request.auth.uid && request.resource.data.userId == resource.data.userId;
+    }
+
+    match /sentryConfigs/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidSentryConfig(request.resource.data);
+      allow update: if isOwner(userId) && isValidSentryConfig(request.resource.data);
+    }
+
+    match /riskSettings/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidRiskSettings(request.resource.data);
+      allow update: if isOwner(userId) && isValidRiskSettings(request.resource.data);
+    }
+
+    match /notificationConfigs/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidNotificationConfig(request.resource.data);
+      allow update: if isOwner(userId) && isValidNotificationConfig(request.resource.data);
+    }
+
+    match /portfolios/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidPortfolio(request.resource.data) && request.resource.data.userId == request.auth.uid;
+      allow update: if isOwner(userId) && isValidPortfolio(request.resource.data) && resource.data.userId == request.auth.uid && request.resource.data.userId == resource.data.userId;
     }
   }
 }

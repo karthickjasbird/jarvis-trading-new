@@ -1,10 +1,10 @@
 {
-  "projectId": "ridermesh",
-  "appId": "1:672124083692:web:9f536766328c60c755f4c9",
-  "apiKey": "AIzaSyCIXvcg9I-5IRGfR2AEpycuJy-ssqlkgsM",
-  "authDomain": "ridermesh.firebaseapp.com",
+  "projectId": "jarvis-trading-terminal",
+  "appId": "1:346772563158:web:c81aad9caf12ab7f389577",
+  "apiKey": "AIzaSyAF4s-Sec42KExB_avEt7EYlabe5vltaY4",
+  "authDomain": "jarvis-trading-terminal.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-fc057d01-a1ff-4b62-a9e8-e1c62f9f3a10",
-  "storageBucket": "ridermesh.firebasestorage.app",
-  "messagingSenderId": "672124083692",
+  "storageBucket": "jarvis-trading-terminal.firebasestorage.app",
+  "messagingSenderId": "346772563158",
   "measurementId": ""
 }

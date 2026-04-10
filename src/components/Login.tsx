@@ -1,40 +1,71 @@
 import { useState, useEffect } from 'react';
-import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from 'firebase/auth';
+import { signInWithPopup, signInWithRedirect, GoogleAuthProvider, onAuthStateChanged, User, getRedirectResult } from 'firebase/auth';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { BrainCircuit } from 'lucide-react';
 
 export function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Check for redirect result first
+    getRedirectResult(auth).then(async (result) => {
+      if (result?.user) {
+        await handleUserLogin(result.user);
+      }
+    }).catch((err) => {
+      console.error("Redirect login error:", err);
+      setError(err.message);
+    });
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
-        // Ensure user exists in Firestore
-        const userRef = doc(db, 'users', user.uid);
-        const userDoc = await getDoc(userRef);
-        if (!userDoc.exists()) {
-          await setDoc(userRef, {
-            uid: user.uid,
-            email: user.email,
-            displayName: user.displayName,
-            role: 'user',
-            createdAt: new Date().toISOString()
-          });
-        }
-        onLogin(user);
+        await handleUserLogin(user);
       }
       setLoading(false);
     });
     return () => unsubscribe();
   }, [onLogin]);
 
+  const handleUserLogin = async (user: User) => {
+    try {
+      // Ensure user exists in Firestore
+      const userRef = doc(db, 'users', user.uid);
+      const userDoc = await getDoc(userRef);
+      if (!userDoc.exists()) {
+        await setDoc(userRef, {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName,
+          role: 'user',
+          createdAt: new Date().toISOString()
+        });
+      }
+      onLogin(user);
+    } catch (err) {
+      console.error("Failed to save user data:", err);
+    }
+  };
+
   const handleGoogleLogin = async () => {
+    setError(null);
     const provider = new GoogleAuthProvider();
     try {
       await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error("Login failed:", error);
+    } catch (error: any) {
+      console.error("Popup login failed:", error);
+      // Fallback to redirect if popup fails due to network/cookie issues
+      if (error.code === 'auth/network-request-failed' || error.code === 'auth/popup-blocked') {
+        try {
+          await signInWithRedirect(auth, provider);
+        } catch (redirectError: any) {
+          console.error("Redirect login failed:", redirectError);
+          setError(redirectError.message);
+        }
+      } else {
+        setError(error.message);
+      }
     }
   };
 
@@ -61,6 +92,13 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
         <h1 className="text-3xl font-bold text-zinc-100 mb-2">Jarvis Terminal</h1>
         <p className="text-zinc-400 mb-8">Secure access required for Sentry Mode and Trading Operations.</p>
         
+        {error && (
+          <div className="w-full bg-red-500/10 border border-red-500/50 text-red-400 p-3 rounded-xl mb-6 text-sm text-left">
+            <p className="font-semibold mb-1">Login Error</p>
+            <p>{error}</p>
+          </div>
+        )}
+
         <button
           onClick={handleGoogleLogin}
           className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2"

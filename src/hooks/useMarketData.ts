@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 export interface Tick {
   type: string;
@@ -9,59 +9,63 @@ export interface Tick {
   volume: number;
 }
 
-export function useMarketData(symbol: string, broker: string) {
+export function useMarketData(symbol: string, broker: string, replayDate?: string, speed: number = 1) {
   const [tick, setTick] = useState<Tick | null>(null);
   const [history, setHistory] = useState<Tick[]>([]);
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     if (!symbol) return;
 
     let isMounted = true;
+    let reconnectTimeout: NodeJS.Timeout;
 
-    const fetchTick = async () => {
-      try {
-        const response = await fetch(`/api/market-data?symbol=${encodeURIComponent(symbol)}&broker=${encodeURIComponent(broker)}`);
-        
-        // If the server is restarting or returns a 502, it might return HTML.
-        // Check content type before parsing JSON.
-        const contentType = response.headers.get("content-type");
-        if (!contentType || !contentType.includes("application/json")) {
-           // Ignore non-JSON responses (like 502 Bad Gateway HTML)
-           return;
-        }
-
-        if (!response.ok) {
-           // Ignore non-ok responses silently during polling
-           return;
-        }
-        
-        const data = await response.json();
-        
-        if (isMounted && data.type === 'tick') {
-          setTick(data);
-          setHistory(prev => {
-            const newHistory = [...prev, data];
-            if (newHistory.length > 50) newHistory.shift();
-            return newHistory;
-          });
-        }
-      } catch (err) {
-        // Suppress network errors (Failed to fetch) during server restarts
-        // console.error('Error fetching tick:', err);
+    const connect = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      let wsUrl = `${protocol}//${window.location.host}/ws/market-data?symbol=${encodeURIComponent(symbol)}&broker=${encodeURIComponent(broker)}`;
+      
+      if (replayDate) {
+        wsUrl += `&replayDate=${encodeURIComponent(replayDate)}&speed=${speed}`;
       }
+      
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onmessage = (event) => {
+        if (!isMounted) return;
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'tick') {
+            setTick(data);
+            setHistory(prev => {
+              const newHistory = [...prev, data];
+              if (newHistory.length > 50) newHistory.shift();
+              return newHistory;
+            });
+          }
+        } catch (e) {
+          console.error("Failed to parse market data", e);
+        }
+      };
+
+      ws.onclose = () => {
+        if (isMounted) {
+          // Reconnect after 2 seconds
+          reconnectTimeout = setTimeout(connect, 2000);
+        }
+      };
     };
 
-    // Fetch immediately
-    fetchTick();
-
-    // Then poll every 1 second
-    const interval = setInterval(fetchTick, 1000);
+    connect();
 
     return () => {
       isMounted = false;
-      clearInterval(interval);
+      clearTimeout(reconnectTimeout);
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
     };
-  }, [symbol, broker]);
+  }, [symbol, broker, replayDate, speed]);
 
   return { tick, history };
 }

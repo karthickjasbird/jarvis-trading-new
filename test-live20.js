@@ -1,0 +1,28 @@
+import { GoogleGenAI, Modality } from '@google/genai';
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const sessionPromise = ai.live.connect({ 
+  model: 'gemini-3.1-flash-live-preview',
+  config: {
+    responseModalities: [Modality.AUDIO],
+    systemInstruction: "You are a helpful assistant.",
+    outputAudioTranscription: {}
+  },
+  callbacks: {
+    onopen: () => {
+      console.log("Connected");
+      sessionPromise.then(s => {
+        s.sendClientContent({ turns: [{ role: 'user', parts: [{ text: "Hello" }] }], turnComplete: true });
+      });
+    },
+    onmessage: (msg) => {
+      console.log("Message:", JSON.stringify(msg));
+    },
+    onerror: (e) => {
+      console.error("Error:", e);
+    },
+    onclose: (e) => {
+      console.log("Closed", e);
+    }
+  }
+});
+setTimeout(() => {}, 10000);
