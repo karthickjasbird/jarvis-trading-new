@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { collection, query, getDocs, addDoc, deleteDoc, doc, updateDoc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import { User } from 'firebase/auth';
-import { Settings, Key, Plus, Trash2, CheckCircle2, XCircle, ShieldCheck, Send, Palette, Brain } from 'lucide-react';
+import { Settings, Key, Plus, Trash2, CheckCircle2, XCircle, ShieldCheck, Send, Palette, Brain, Lock } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface BrokerConfig {
@@ -51,12 +51,90 @@ export function BrokerSettings({
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newConfig, setNewConfig] = useState({ brokerName: 'zerodha', apiKey: '', apiSecret: '' });
-  const [activeTab, setActiveTab] = useState<'brokers' | 'notifications' | 'preferences'>('brokers');
+  const [activeTab, setActiveTab] = useState<'brokers' | 'notifications' | 'preferences' | 'apikeys'>('brokers');
+  const [testingId, setTestingId] = useState<string | null>(null);
+  
+  // Per-user API Keys
+  const [userKeys, setUserKeys] = useState({
+    geminiApiKey: '',
+    binanceApiKey: '',
+    binanceSecretKey: '',
+    telegramBotToken: '',
+    telegramChatId: '',
+  });
+  const [keyStatus, setKeyStatus] = useState({ hasGemini: false, hasBinance: false, hasTelegram: false });
+  const [savingKeys, setSavingKeys] = useState(false);
+
+  const testConnection = async (configId: string) => {
+    setTestingId(configId);
+    try {
+      const res = await fetch(`/api/broker/test/${user.uid}`, { method: 'POST' });
+      const data = await res.json();
+      if (data.connected) {
+        toast.success(data.message, {
+          description: `Balance: ${data.totalBalance} ${data.currency}`,
+          duration: 5000
+        });
+      } else {
+        toast.error('Connection Failed', { description: data.error, duration: 5000 });
+      }
+    } catch (err: any) {
+      toast.error('Test failed', { description: err.message });
+    } finally {
+      setTestingId(null);
+    }
+  };
 
   useEffect(() => {
     fetchConfigs();
     fetchNotificationConfig();
+    fetchUserKeys();
   }, [user]);
+
+  const fetchUserKeys = async () => {
+    try {
+      const res = await fetch(`/api/secrets/${user.uid}`);
+      const data = await res.json();
+      if (data.secrets) {
+        setKeyStatus({
+          hasGemini: data.secrets.hasGemini,
+          hasBinance: data.secrets.hasBinance,
+          hasTelegram: data.secrets.hasTelegram,
+        });
+      }
+    } catch {}
+  };
+
+  const saveUserKeys = async () => {
+    setSavingKeys(true);
+    try {
+      // Only send non-empty fields
+      const payload: Record<string, string> = {};
+      if (userKeys.geminiApiKey) payload.geminiApiKey = userKeys.geminiApiKey;
+      if (userKeys.binanceApiKey) payload.binanceApiKey = userKeys.binanceApiKey;
+      if (userKeys.binanceSecretKey) payload.binanceSecretKey = userKeys.binanceSecretKey;
+      if (userKeys.telegramBotToken) payload.telegramBotToken = userKeys.telegramBotToken;
+      if (userKeys.telegramChatId) payload.telegramChatId = userKeys.telegramChatId;
+
+      const res = await fetch(`/api/secrets/${user.uid}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        toast.success('API keys saved securely!');
+        setUserKeys({ geminiApiKey: '', binanceApiKey: '', binanceSecretKey: '', telegramBotToken: '', telegramChatId: '' });
+        await fetchUserKeys();
+      } else {
+        toast.error('Failed to save keys');
+      }
+    } catch {
+      toast.error('Failed to save API keys');
+    } finally {
+      setSavingKeys(false);
+    }
+  };
 
   const fetchNotificationConfig = async () => {
     try {
@@ -192,12 +270,21 @@ export function BrokerSettings({
       <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-2xl max-h-[80vh] overflow-y-auto shadow-2xl">
         <div className="sticky top-0 bg-zinc-900/95 backdrop-blur border-b border-zinc-800 p-6 flex items-center justify-between z-10">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-blue-500/10 rounded-lg">
-              <Settings className="w-6 h-6 text-blue-400" />
-            </div>
+            {user.photoURL ? (
+              <img 
+                src={user.photoURL} 
+                alt="Profile" 
+                className="w-10 h-10 rounded-full border border-zinc-700"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white font-bold">
+                {(user.displayName || user.email || 'U')[0].toUpperCase()}
+              </div>
+            )}
             <div>
-              <h2 className="text-xl font-bold text-zinc-100">Settings</h2>
-              <p className="text-sm text-zinc-400">Manage connections, notifications, and preferences</p>
+              <h2 className="text-xl font-bold text-zinc-100">{user.displayName || 'Settings'}</h2>
+              <p className="text-sm text-zinc-400">{user.email}</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-zinc-400">
@@ -210,19 +297,25 @@ export function BrokerSettings({
             onClick={() => setActiveTab('brokers')}
             className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'brokers' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
-            Broker APIs
+            Brokers
+          </button>
+          <button
+            onClick={() => setActiveTab('apikeys')}
+            className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'apikeys' ? 'text-amber-400 border-b-2 border-amber-400' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            🔑 API Keys
           </button>
           <button
             onClick={() => setActiveTab('notifications')}
             className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'notifications' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
-            Notifications
+            Alerts
           </button>
           <button
             onClick={() => setActiveTab('preferences')}
             className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === 'preferences' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
-            Preferences
+            Style
           </button>
         </div>
 
@@ -270,6 +363,15 @@ export function BrokerSettings({
                               className="text-sm px-4 py-1.5 rounded-md bg-yellow-500/20 text-yellow-500 border border-yellow-500/50 hover:bg-yellow-500/30 transition-colors font-medium"
                             >
                               Login Now
+                            </button>
+                          )}
+                          {config.isActive && (
+                            <button
+                              onClick={() => testConnection(config.id)}
+                              disabled={testingId === config.id}
+                              className="text-sm px-3 py-1.5 rounded-md bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30 transition-colors font-medium disabled:opacity-50"
+                            >
+                              {testingId === config.id ? 'Testing...' : '🔌 Test'}
                             </button>
                           )}
                           <button 
@@ -419,7 +521,58 @@ export function BrokerSettings({
                 </button>
               </form>
             </div>
-          ) : (
+          ) : activeTab === 'apikeys' ? (
+            <div className="space-y-6">
+              {/* Status Overview */}
+              <div className={`p-4 rounded-xl border text-center ${keyStatus.hasGemini ? 'border-green-500/30 bg-green-500/5' : 'border-amber-500/30 bg-amber-500/5'}`}>
+                <div className={`text-2xl mb-1 ${keyStatus.hasGemini ? 'text-green-400' : 'text-amber-400'}`}>{keyStatus.hasGemini ? '✓' : '⚠'}</div>
+                <div className="text-sm font-medium text-zinc-300">{keyStatus.hasGemini ? 'Personal Gemini Key Active' : 'Using Server Default Key'}</div>
+                <div className="text-[11px] text-zinc-500 mt-1">{keyStatus.hasGemini ? 'Your own API quota is being used' : 'Set your own key to use your personal quota'}</div>
+              </div>
+
+              <div className="bg-zinc-800/30 border border-zinc-700 rounded-xl p-6 space-y-5">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="p-2 bg-amber-500/10 rounded-lg">
+                    <Lock className="w-6 h-6 text-amber-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-medium text-zinc-200">Gemini AI Key</h3>
+                    <p className="text-sm text-zinc-400">Powers all of Jarvis&apos;s reasoning, analysis, and conversation</p>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-zinc-300 mb-1">API Key</label>
+                  <input
+                    type="password"
+                    value={userKeys.geminiApiKey}
+                    onChange={e => setUserKeys({...userKeys, geminiApiKey: e.target.value})}
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-2 text-zinc-200 focus:outline-none focus:border-amber-500 font-mono text-sm"
+                    placeholder={keyStatus.hasGemini ? '••••••• (already set — leave blank to keep)' : 'AIzaSy...'}
+                  />
+                  <p className="text-[11px] text-zinc-500 mt-1">Get your key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">aistudio.google.com</a></p>
+                </div>
+
+                <button
+                  onClick={saveUserKeys}
+                  disabled={savingKeys || !userKeys.geminiApiKey}
+                  className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-black rounded-lg font-bold transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
+                >
+                  <ShieldCheck className="w-5 h-5" />
+                  {savingKeys ? 'Saving...' : 'Save API Key'}
+                </button>
+              </div>
+
+              <div className="bg-zinc-900/40 border border-zinc-800 rounded-xl p-4 space-y-2">
+                <p className="text-[11px] text-zinc-500 leading-relaxed">
+                  <strong className="text-zinc-300">📌 Other Keys:</strong> Binance exchange keys are managed in the <strong className="text-blue-400">Brokers</strong> tab. Telegram notifications are in the <strong className="text-blue-400">Alerts</strong> tab.
+                </p>
+                <p className="text-[11px] text-zinc-500 leading-relaxed">
+                  <strong className="text-zinc-300">🔒 Security:</strong> Your key is stored in your personal Firestore vault and never exposed to the frontend after saving.
+                </p>
+              </div>
+            </div>
+          ) : activeTab === 'preferences' ? (
             <div className="space-y-6">
               <div className="bg-zinc-800/30 border border-zinc-700 rounded-xl p-6 space-y-6">
                 <div className="flex items-center gap-3 mb-4">
@@ -477,7 +630,7 @@ export function BrokerSettings({
                 </div>
               </div>
             </div>
-          )}
+          ) : null}
         </div>
       </div>
     </div>

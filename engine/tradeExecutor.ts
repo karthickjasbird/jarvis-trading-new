@@ -57,8 +57,27 @@ export class TradeExecutor {
   }
 
   async execute(params: any) {
-    const { userId, symbol, side, quantity, market, mode, isPractice, stopLossPrice, takeProfitPrice, trailingStopDistance } = params;
-    const price = this.marketState[symbol]?.price || 100;
+    const { userId, symbol, side, quantity, market, mode, isPractice, stopLossPrice, takeProfitPrice, trailingStopDistance, profitTarget } = params;
+    
+    // Fetch REAL price from Binance for accurate fill pricing
+    let price = this.marketState[symbol]?.price || 100;
+    try {
+      const cleanSymbol = (symbol || '').replace('/', '');
+      if (cleanSymbol) {
+        const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`);
+        const data = await res.json();
+        const binancePrice = parseFloat(data.price);
+        if (binancePrice && !isNaN(binancePrice)) {
+          price = binancePrice;
+          // Update marketState with real price
+          if (this.marketState[symbol]) {
+            this.marketState[symbol].price = binancePrice;
+          } else {
+            this.marketState[symbol] = { price: binancePrice, lastChange: 0 };
+          }
+        }
+      }
+    } catch {}
     
     // Apply Risk Management Guardrails
     await this.checkRiskManagement(userId, Number(quantity), price);
@@ -67,7 +86,25 @@ export class TradeExecutor {
     let orderId = `paper-order-${Date.now()}`;
     let executedQuantity = Number(quantity);
 
-    if (mode === 'live' && !isPractice) {
+    // SAFETY GUARD: Double-check before real money execution
+    if (!isPractice && (mode === 'live' || mode === 'autonomous' || mode === 'sentry')) {
+      console.log(`[SAFETY] ⚠️ REAL MONEY TRADE DETECTED: ${side} ${quantity} ${symbol} for user ${userId}`);
+      
+      // Log to audit trail BEFORE execution
+      await this.db.collection('auditLog').add({
+        userId,
+        action: 'REAL_TRADE_ATTEMPT',
+        symbol,
+        side,
+        quantity: Number(quantity),
+        price,
+        mode,
+        timestamp: new Date().toISOString(),
+        status: 'pending'
+      });
+    }
+
+    if (!isPractice) {  // Use isPractice as the single source of truth — always real if NOT practice
       // Fetch active broker configs
       const brokerConfigsSnapshot = await this.db.collection('users').doc(userId).collection('brokerConfigs').where('isActive', '==', true).get();
       if (brokerConfigsSnapshot.empty) {
@@ -100,10 +137,7 @@ export class TradeExecutor {
             enableRateLimit: true,
           });
           
-          // For safety in this demo, we'll use sandbox mode if available
-          if (exchange.has['sandbox']) {
-            exchange.setSandboxMode(true);
-          }
+          // LIVE MODE: Never use sandbox — user has explicitly switched to live/real money
 
           const order = await exchange.createMarketOrder(symbol, side, executedQuantity);
           orderId = order.id;
@@ -133,6 +167,7 @@ export class TradeExecutor {
       stopLossPrice: stopLossPrice || null,
       takeProfitPrice: takeProfitPrice || null,
       trailingStopDistance: trailingStopDistance || null,
+      profitTarget: profitTarget || null,
       highestPrice: side === 'buy' ? fillPrice : null,
       lowestPrice: side === 'sell' ? fillPrice : null,
       createdAt: new Date().toISOString()
@@ -191,7 +226,7 @@ export class TradeExecutor {
     let currentPrice = this.marketState[data.symbol]?.price || data.entryPrice;
     let exitOrderId = `paper-close-${Date.now()}`;
 
-    if (data.mode === 'live' && !data.isPractice) {
+    if (!data.isPractice) {  // isPractice is the single source of truth for real vs paper
       const brokerConfigsSnapshot = await this.db.collection('users').doc(userId).collection('brokerConfigs').where('isActive', '==', true).get();
       if (!brokerConfigsSnapshot.empty) {
         const brokerConfig = brokerConfigsSnapshot.docs[0].data();
@@ -220,9 +255,7 @@ export class TradeExecutor {
               enableRateLimit: true,
             });
             
-            if (exchange.has['sandbox']) {
-              exchange.setSandboxMode(true);
-            }
+            // LIVE MODE: Never use sandbox — user has explicitly switched to live/real money
 
             const order = await exchange.createMarketOrder(data.symbol, closeSide, data.quantity);
             exitOrderId = order.id;
@@ -252,7 +285,7 @@ export class TradeExecutor {
     const portDoc = await portRef.get();
     if (portDoc.exists) {
       const portData = portDoc.data()!;
-      if (data.mode === 'live' && !data.isPractice) {
+      if (!data.isPractice) {  // Update real portfolio balance when closing a live trade
         await portRef.update({
           liveBalance: (portData.liveBalance || 0) + realizedPnl,
           liveRealizedPnl: (portData.liveRealizedPnl || 0) + realizedPnl,
@@ -282,6 +315,123 @@ export class TradeExecutor {
         exitPrice: currentPrice,
         pnl: realizedPnl
       }
+    };
+  }
+
+  /**
+   * Partially close a position (e.g., close 50% at TP1, let rest ride)
+   * Returns the realized PnL from the closed portion.
+   */
+  async partialClosePosition(userId: string, tradeId: string, closePercent: number = 50) {
+    const tradeRef = this.db.collection('trades').doc(tradeId);
+    const doc = await tradeRef.get();
+    
+    if (!doc.exists) throw new Error("Trade not found");
+    const data = doc.data()!;
+    if (data.userId !== userId) throw new Error("Unauthorized");
+    if (data.status !== 'open') throw new Error("Trade already closed");
+
+    const closeQuantity = data.quantity * (closePercent / 100);
+    const remainingQuantity = data.quantity - closeQuantity;
+
+    // Fetch current price
+    let currentPrice = this.marketState[data.symbol]?.price || data.entryPrice;
+    try {
+      const cleanSymbol = (data.symbol || '').replace('/', '');
+      if (cleanSymbol) {
+        const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`);
+        const priceData = await res.json();
+        const binancePrice = parseFloat(priceData.price);
+        if (binancePrice && !isNaN(binancePrice)) currentPrice = binancePrice;
+      }
+    } catch {}
+
+    let exitOrderId = `paper-partial-${Date.now()}`;
+
+    // Execute partial close on real broker if live
+    if (!data.isPractice) {
+      const brokerConfigsSnapshot = await this.db.collection('users').doc(userId).collection('brokerConfigs').where('isActive', '==', true).get();
+      if (!brokerConfigsSnapshot.empty) {
+        const brokerConfig = brokerConfigsSnapshot.docs[0].data();
+        const closeSide = data.side === 'buy' ? 'sell' : 'buy';
+        try {
+          if (['binance', 'bybit'].includes(brokerConfig.brokerName)) {
+            const exchangeClass = (ccxt as any)[brokerConfig.brokerName];
+            const exchange = new exchangeClass({
+              apiKey: brokerConfig.apiKey,
+              secret: brokerConfig.apiSecret,
+              enableRateLimit: true,
+            });
+            const order = await exchange.createMarketOrder(data.symbol, closeSide, closeQuantity);
+            exitOrderId = order.id;
+            currentPrice = order.average || order.price || currentPrice;
+          }
+        } catch (error: any) {
+          console.error("Live partial close failed:", error);
+          throw new Error(`Live partial close failed: ${error.message}`);
+        }
+      }
+    }
+
+    // Calculate PnL for the closed portion
+    const isLong = data.side === 'buy';
+    const priceDiff = currentPrice - data.entryPrice;
+    const partialPnl = isLong ? (priceDiff * closeQuantity) : (-priceDiff * closeQuantity);
+
+    // Update trade: reduce quantity, move stop to breakeven, add trailing stop
+    await tradeRef.update({
+      quantity: remainingQuantity,
+      originalQuantity: data.quantity,  // Preserve original for history
+      partialExits: [...(data.partialExits || []), {
+        quantity: closeQuantity,
+        exitPrice: currentPrice,
+        pnl: partialPnl,
+        exitOrderId,
+        closedAt: new Date().toISOString(),
+      }],
+      // Move stop to breakeven — risk-free on the remainder!
+      stopLossPrice: data.entryPrice,
+      // Enable trailing stop on remainder (use 1% of price as distance if not set)
+      trailingStopDistance: data.trailingStopDistance || (currentPrice * 0.01),
+      // Clear the take profit so it doesn't trigger a full close again
+      takeProfitPrice: null,
+      partialClosedAt: new Date().toISOString(),
+    });
+
+    // Update portfolio with partial profit
+    const portRef = this.db.collection('portfolios').doc(userId);
+    const portDoc = await portRef.get();
+    if (portDoc.exists) {
+      const portData = portDoc.data()!;
+      if (!data.isPractice) {
+        await portRef.update({
+          liveBalance: (portData.liveBalance || 0) + partialPnl,
+          liveRealizedPnl: (portData.liveRealizedPnl || 0) + partialPnl,
+          updatedAt: new Date().toISOString()
+        });
+      } else {
+        await portRef.update({
+          paperBalance: (portData.paperBalance || 100000) + partialPnl,
+          realizedPnl: (portData.realizedPnl || 0) + partialPnl,
+          updatedAt: new Date().toISOString()
+        });
+      }
+    }
+
+    // Telegram notification
+    const pnlEmoji = partialPnl >= 0 ? '✅' : '❌';
+    const message = `📊 <b>Partial Close (${closePercent}%)</b>\n\n${data.side === 'buy' ? 'LONG' : 'SHORT'} ${data.symbol}\nClosed: ${closeQuantity} @ $${currentPrice.toFixed(2)}\nPartial PnL: ${pnlEmoji} $${partialPnl.toFixed(2)}\nRemaining: ${remainingQuantity} (stop moved to breakeven, trailing active)`;
+    await sendTelegramNotification(this.db, userId, message);
+
+    console.log(`[TRADE] Partial close ${closePercent}% of ${data.symbol}: PnL $${partialPnl.toFixed(2)}, remaining ${remainingQuantity}`);
+
+    return {
+      tradeId,
+      exitPrice: currentPrice,
+      closedQuantity: closeQuantity,
+      remainingQuantity,
+      partialPnl,
+      status: 'partial_closed',
     };
   }
 

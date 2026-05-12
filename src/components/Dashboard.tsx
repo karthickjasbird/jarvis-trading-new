@@ -14,36 +14,56 @@ import {
   Target,
   Wallet,
   Newspaper,
-  Waves
+  Waves,
+  Bot,
+  User
 } from 'lucide-react';
 import { Position, ClosedTrade, DailyPnl, SentryLog } from '../hooks/useTrades';
 import { useMarketIntel } from '../hooks/useMarketIntel';
 import { toast } from 'sonner';
+import { TimeMachineControls } from './TimeMachineControls';
 
 interface DashboardProps {
   positions: Position[];
+  pendingTrades?: any[];
   tradeHistory: ClosedTrade[];
   dailyPnl: DailyPnl;
-  portfolio: { paperBalance: number; realizedPnl: number };
-  sentryConfig?: { active: boolean, symbol?: string, condition?: string, targetPrice?: number, side?: string, quantity?: number };
+  portfolio: { paperBalance: number; realizedPnl: number; liveBalance?: number; liveRealizedPnl?: number };
+  sentryConfig?: { active: boolean, symbol?: string, condition?: string, targetPrice?: number, side?: string, quantity?: number, isAutonomous?: boolean, autonomousPrompt?: string };
   sentryLogs?: SentryLog[];
   onClosePosition: (tradeId: string) => Promise<any>;
+  onApproveTrade?: (tradeId: string) => Promise<any>;
   isLoading: boolean;
+  isPracticeMode?: boolean;
+  tradingMode?: 'sentry' | 'copilot';
+  showTimeMachine?: boolean;
+  isReplaying?: boolean;
+  onStartReplay?: (date: string, speed: number, symbol: string, jarvisEnabled: boolean) => void;
+  onStopReplay?: () => void;
 }
 
 export function Dashboard({
   positions,
+  pendingTrades = [],
   tradeHistory,
   dailyPnl,
   portfolio,
   sentryConfig,
   sentryLogs = [],
   onClosePosition,
+  onApproveTrade,
   isLoading,
+  isPracticeMode = true,
+  tradingMode = 'copilot',
+  showTimeMachine = false,
+  isReplaying = false,
+  onStartReplay,
+  onStopReplay,
 }: DashboardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [activeTab, setActiveTab] = useState<'positions' | 'history' | 'sentry' | 'intel'>('positions');
+  const [activeTab, setActiveTab] = useState<'positions' | 'pending' | 'history' | 'sentry' | 'intel'>('positions');
   const [closingId, setClosingId] = useState<string | null>(null);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
   const { news, whaleAlerts, isLoading: intelLoading } = useMarketIntel();
 
   const handleClosePosition = async (tradeId: string, symbol: string) => {
@@ -64,11 +84,43 @@ export function Dashboard({
     }
   };
 
+  const handleApproveTrade = async (tradeId: string) => {
+    if (!onApproveTrade) return;
+    setApprovingId(tradeId);
+    try {
+      await onApproveTrade(tradeId);
+      toast.success('Trade Approved and Executed Successfully!');
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to approve trade');
+    } finally {
+      setApprovingId(null);
+    }
+  };
+
   const pnlColor = dailyPnl.totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400';
   const pnlBgColor = dailyPnl.totalPnl >= 0 ? 'bg-emerald-500/10' : 'bg-red-500/10';
 
   return (
     <div className="fixed bottom-0 left-0 right-0 z-40">
+
+      {/* ── Time Machine Dock (sits above the main dock) ────────────── */}
+      <AnimatePresence>
+        {isPracticeMode && showTimeMachine && onStartReplay && onStopReplay && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <TimeMachineControls 
+              isReplaying={isReplaying}
+              onStartReplay={onStartReplay}
+              onStopReplay={onStopReplay}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* ── Summary Bar (Always Visible) ─────────────────────────────── */}
       <motion.div
         id="dashboard-summary"
@@ -76,29 +128,51 @@ export function Dashboard({
         className="cursor-pointer bg-zinc-900/90 backdrop-blur-xl border-t border-zinc-800/80 px-6 py-3 flex items-center justify-between hover:bg-zinc-800/90 transition-colors"
       >
         <div className="flex items-center gap-6">
-          {/* Mode Badge */}
-          {sentryConfig?.active ? (
+          {/* Trading Mode Badge */}
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border ${
+            isPracticeMode
+              ? 'bg-amber-500/15 border-amber-500/30'
+              : 'bg-cyan-500/15 border-cyan-500/30'
+          }`}>
+            <div className={`w-2 h-2 rounded-full animate-pulse ${
+              isPracticeMode ? 'bg-amber-400' : 'bg-cyan-400'
+            }`} />
+            <span className={`text-xs font-semibold tracking-wider uppercase ${
+              isPracticeMode ? 'text-amber-400' : 'text-cyan-400'
+            }`}>
+              {isPracticeMode ? '🧪 Practice' : '🔴 Live'}
+            </span>
+          </div>
+
+          {/* Execution Mode Status */}
+          {tradingMode === 'sentry' ? (
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-purple-500/15 border border-purple-500/30">
-              <div className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+              <Bot className="w-3.5 h-3.5 text-purple-400 animate-pulse" />
               <span className="text-xs font-semibold text-purple-400 tracking-wider uppercase">
-                Sentry Active
+                Sentry
               </span>
             </div>
           ) : (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-blue-500/15 border border-blue-500/30">
-              <div className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
-              <span className="text-xs font-semibold text-blue-400 tracking-wider uppercase">
-                Co-Pilot
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-cyan-500/15 border border-cyan-500/30">
+              <User className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-xs font-semibold text-cyan-400 tracking-wider uppercase">
+                Co-pilot
               </span>
             </div>
           )}
 
           {/* Portfolio Balance */}
           <div className="flex items-center gap-2">
-            <Wallet className="w-3.5 h-3.5 text-zinc-500" />
-            <span className="text-sm font-bold font-mono text-zinc-200">
-              ${portfolio.paperBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            <Wallet className={`w-3.5 h-3.5 ${isPracticeMode ? 'text-amber-500/60' : 'text-cyan-500/60'}`} />
+            <span className={`text-sm font-bold font-mono ${isPracticeMode ? 'text-zinc-200' : 'text-cyan-200'}`}>
+              ${(isPracticeMode ? portfolio.paperBalance : portfolio.liveBalance || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded ${isPracticeMode ? 'bg-amber-500/10 text-amber-500/70' : 'bg-cyan-500/10 text-cyan-500/70'}`}>
+              {isPracticeMode ? 'PAPER' : 'USDT'}
+            </span>
+            {!isPracticeMode && !(portfolio.liveBalance) && (
+              <span className="text-[10px] text-red-400/70 font-medium">No Broker</span>
+            )}
           </div>
 
           {/* Today's P&L */}
@@ -185,6 +259,24 @@ export function Dashboard({
                     )}
                   </span>
                 </button>
+                {pendingTrades.length > 0 && (
+                <button
+                  onClick={() => setActiveTab('pending')}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    activeTab === 'pending'
+                      ? 'bg-zinc-800 text-amber-500'
+                      : 'text-zinc-500 hover:text-amber-500 hover:bg-zinc-800/50'
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <Zap className="w-4 h-4 animate-pulse text-amber-500" />
+                    Pending Approvals
+                    <span className="px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-500 text-xs font-bold">
+                      {pendingTrades.length}
+                    </span>
+                  </span>
+                </button>
+                )}
                 <button
                   onClick={() => setActiveTab('history')}
                   className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
@@ -350,6 +442,46 @@ export function Dashboard({
                           </motion.div>
                         );
                       })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Pending Approvals Tab ──────────────────────────────── */}
+              {activeTab === 'pending' && (
+                <div className="px-6 pb-4">
+                  {pendingTrades.length === 0 ? (
+                    <div className="text-center py-10">
+                       <Zap className="w-8 h-8 text-zinc-700 mx-auto mb-3" />
+                       <p className="text-zinc-500 text-sm">No trades pending approval</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4 pt-2">
+                      {pendingTrades.map((trade) => (
+                        <div key={trade.id} className="bg-amber-950/20 border border-amber-500/30 rounded-xl p-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-3">
+                              <span className="px-2 py-1 bg-amber-500/20 text-amber-400 text-xs font-bold uppercase rounded border border-amber-500/30">
+                                {trade.side}
+                              </span>
+                              <span className="text-zinc-100 font-bold">{trade.symbol}</span>
+                              <span className="text-sm font-mono text-zinc-400">Qty: {trade.quantity}</span>
+                            </div>
+                            <button 
+                              onClick={() => handleApproveTrade(trade.id)}
+                              disabled={approvingId === trade.id}
+                              className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm rounded transition-colors disabled:opacity-50"
+                            >
+                              {approvingId === trade.id ? 'Approving...' : 'Approve'}
+                            </button>
+                          </div>
+                          
+                          <div className="bg-black/20 p-3 rounded-lg border border-black/40">
+                            <p className="text-xs text-zinc-400 mb-1 font-semibold uppercase tracking-wider">Jarvis Reasoning</p>
+                            <p className="text-sm text-zinc-300 italic">"{trade.reasoning}"</p>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>

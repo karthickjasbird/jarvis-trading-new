@@ -3,31 +3,37 @@ import { motion } from 'motion/react';
 export type OrbVariant = 'hologram' | 'liquid' | 'ethereal';
 
 interface OrbProps {
-  state: 'idle' | 'listening' | 'speaking' | 'connecting';
+  state: 'idle' | 'listening' | 'speaking' | 'connecting' | 'mic-active' | 'texting';
   volume?: number;
   variant?: OrbVariant;
+  tradingMode?: 'sentry' | 'copilot';
 }
 
-export function Orb({ state, volume = 0, variant = 'hologram' }: OrbProps) {
-  const isReactive = (state === 'listening' || state === 'speaking') && volume > 0.01;
+export function Orb({ state, volume = 0, variant = 'hologram', tradingMode = 'copilot' }: OrbProps) {
+  const isReactive = (state === 'listening' || state === 'speaking' || state === 'mic-active') && volume > 0.01;
   
   // Dynamic values based on volume
   const scale = isReactive ? 1 + (volume * 0.3) : 1;
   const opacity = isReactive ? 0.7 + (volume * 0.3) : 0.5;
 
-  // Colors based on state
+  // Colors based on state — idle changes to purple in sentry mode
+  const isSentry = tradingMode === 'sentry';
   const colors = {
-    idle: 'rgba(6, 182, 212, 0.4)', // Dim Cyan
+    idle: isSentry ? 'rgba(168, 85, 247, 0.5)' : 'rgba(6, 182, 212, 0.4)', // Purple in sentry, Cyan in copilot
     connecting: 'rgba(245, 158, 11, 0.8)', // Amber
     listening: 'rgba(16, 185, 129, 0.9)', // Emerald
     speaking: 'rgba(59, 130, 246, 0.9)', // Blue
+    'mic-active': 'rgba(249, 115, 22, 0.9)', // Orange
+    texting: 'rgba(34, 197, 94, 0.9)', // Green
   };
   
   const glowColors = {
-    idle: 'rgba(6, 182, 212, 0.15)',
+    idle: isSentry ? 'rgba(168, 85, 247, 0.2)' : 'rgba(6, 182, 212, 0.15)',
     connecting: 'rgba(245, 158, 11, 0.3)',
     listening: 'rgba(16, 185, 129, 0.4)',
     speaking: 'rgba(59, 130, 246, 0.4)',
+    'mic-active': 'rgba(249, 115, 22, 0.4)',
+    texting: 'rgba(34, 197, 94, 0.4)',
   };
 
   const activeColor = colors[state];

@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "346772563158",
+    "project_id": "jarvis-trading-terminal",
+    "storage_bucket": "jarvis-trading-terminal.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:346772563158:android:4dc3d67038a9c080389577",
+        "android_client_info": {
+          "package_name": "com.jarvis.trading"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "346772563158-ggnlrvsnvjt4kc8m2bn1cs6i5kchnnh4.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCiF3hg7GraKXR_1L3lz-xfT40Npy0zWZA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "346772563158-ggnlrvsnvjt4kc8m2bn1cs6i5kchnnh4.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

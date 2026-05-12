@@ -1,10 +1,10 @@
 {
-  "projectId": "jarvis-trading-terminal",
-  "appId": "1:346772563158:web:c81aad9caf12ab7f389577",
-  "apiKey": "AIzaSyAF4s-Sec42KExB_avEt7EYlabe5vltaY4",
-  "authDomain": "jarvis-trading-terminal.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-fc057d01-a1ff-4b62-a9e8-e1c62f9f3a10",
-  "storageBucket": "jarvis-trading-terminal.firebasestorage.app",
-  "messagingSenderId": "346772563158",
-  "measurementId": ""
+  "projectId": "jarvis-trading-terminal-bba57",
+  "appId": "1:30620826032:web:20290d1a639e941de4be75",
+  "apiKey": "AIzaSyC6N0_mC7nkUUjEhtGtrRPkRlVu4fkZT0g",
+  "authDomain": "jarvis-trading-terminal-bba57.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "jarvis-trading-terminal-bba57.firebasestorage.app",
+  "messagingSenderId": "30620826032",
+  "measurementId": "G-RC5QNLEK2Y"
 }

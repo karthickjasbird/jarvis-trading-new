@@ -2,7 +2,7 @@ import { useMarketData } from '../hooks/useMarketData';
 import { TrendingUp, TrendingDown } from 'lucide-react';
 
 export function LiveMarketData({ symbol, broker, replayDate, speed }: { symbol: string, broker: string, replayDate?: string, speed?: number }) {
-  const { tick, history } = useMarketData(symbol, broker);
+  const { tick, history } = useMarketData(symbol, broker, replayDate, speed);
 
   if (!tick) {
     return (

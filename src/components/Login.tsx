@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
-import { signInWithPopup, signInWithRedirect, GoogleAuthProvider, onAuthStateChanged, User, getRedirectResult } from 'firebase/auth';
+import { signInWithPopup, signInWithRedirect, signInWithCredential, GoogleAuthProvider, onAuthStateChanged, User, getRedirectResult } from 'firebase/auth';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { BrainCircuit } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
+import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 
 export function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [loading, setLoading] = useState(true);
@@ -52,9 +54,19 @@ export function Login({ onLogin }: { onLogin: (user: User) => void }) {
     setError(null);
     const provider = new GoogleAuthProvider();
     try {
-      await signInWithPopup(auth, provider);
+      if (Capacitor.isNativePlatform()) {
+        const result = await FirebaseAuthentication.signInWithGoogle({ useCredentialManager: false });
+        if (result.credential?.idToken) {
+          const credential = GoogleAuthProvider.credential(result.credential.idToken);
+          await signInWithCredential(auth, credential);
+        } else {
+          throw new Error('No ID token received from Google.');
+        }
+      } else {
+        await signInWithPopup(auth, provider);
+      }
     } catch (error: any) {
-      console.error("Popup login failed:", error);
+      console.error("Login failed:", error);
       // Fallback to redirect if popup fails due to network/cookie issues
       if (error.code === 'auth/network-request-failed' || error.code === 'auth/popup-blocked') {
         try {

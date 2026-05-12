@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
-import { db } from '../firebase';
-import { collection, query, where, onSnapshot, doc, setDoc, updateDoc, getDoc, orderBy, limit } from 'firebase/firestore';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { db, auth } from '../firebase';
+import { collection, query, where, onSnapshot, doc, setDoc, updateDoc, getDoc } from 'firebase/firestore';
 import { memoryService } from '../services/memoryService';
 
 export interface Position {
@@ -46,6 +46,7 @@ export interface SentryLog {
 
 export function useTrades(userId: string, isPracticeMode: boolean = false) {
   const [positions, setPositions] = useState<Position[]>([]);
+  const [pendingTrades, setPendingTrades] = useState<any[]>([]);
   const [tradeHistory, setTradeHistory] = useState<ClosedTrade[]>([]);
   const [portfolio, setPortfolio] = useState({ paperBalance: 100000, realizedPnl: 0, liveBalance: 0, liveRealizedPnl: 0 });
   const [sentryConfig, setSentryConfig] = useState<any>({ active: false });
@@ -88,7 +89,7 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
     initPortfolio();
   }, [userId]);
 
-  // Listen to Open Positions
+  // Listen to Open Positions (real-time Firestore updates for trade status)
   useEffect(() => {
     if (!userId) return;
     const q = query(
@@ -101,20 +102,13 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const openTrades = snapshot.docs.map(doc => {
         const data = doc.data();
-        // Mock current price for now, in a real app this comes from a websocket
-        const currentPrice = data.entryPrice * (1 + (Math.random() * 0.02 - 0.01)); 
-        const isLong = data.side === 'buy';
-        const priceDiff = currentPrice - data.entryPrice;
-        const unrealizedPnl = isLong ? (priceDiff * data.quantity) : (-priceDiff * data.quantity);
-        const unrealizedPnlPercent = (unrealizedPnl / (data.entryPrice * data.quantity)) * 100;
-
         return {
           id: doc.id,
           tradeId: doc.id,
           ...data,
-          currentPrice,
-          unrealizedPnl,
-          unrealizedPnlPercent
+          currentPrice: data.entryPrice, // Stable default — no Math.random()
+          unrealizedPnl: 0,
+          unrealizedPnlPercent: 0
         };
       }) as Position[];
       setPositions(openTrades);
@@ -124,7 +118,63 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
     return () => unsubscribe();
   }, [userId, isPracticeMode]);
 
-  // Listen to Trade History
+  // Listen to Pending Approvals
+  useEffect(() => {
+    if (!userId) return;
+    const q = query(
+      collection(db, 'trades'),
+      where('userId', '==', userId),
+      where('status', '==', 'pending')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const pending = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setPendingTrades(pending);
+    });
+
+    return () => unsubscribe();
+  }, [userId]);
+
+  // Poll server for real market prices (every 3 seconds)
+  useEffect(() => {
+    if (!userId) return;
+    const fetchPrices = async () => {
+      try {
+        const res = await fetch(`/api/positions?userId=${userId}&isPractice=${isPracticeMode}`);
+        const data = await res.json();
+        if (data.positions && data.positions.length > 0) {
+          setPositions(prev => {
+            if (prev.length === 0) return prev;
+            return prev.map(pos => {
+              const serverPos = data.positions.find((sp: any) => sp.id === pos.id);
+              if (serverPos) {
+                const unrealizedPnl = serverPos.unrealizedPnl || 0;
+                return {
+                  ...pos,
+                  currentPrice: serverPos.currentPrice,
+                  unrealizedPnl,
+                  unrealizedPnlPercent: pos.entryPrice * pos.quantity !== 0
+                    ? (unrealizedPnl / (pos.entryPrice * pos.quantity)) * 100
+                    : 0
+                };
+              }
+              return pos;
+            });
+          });
+        }
+      } catch (e) {
+        // Silently fail — onSnapshot still provides base data
+      }
+    };
+    fetchPrices();
+    const interval = setInterval(fetchPrices, 3000);
+    return () => clearInterval(interval);
+  }, [userId, isPracticeMode]);
+
+  // Listen to Trade History (no orderBy to avoid composite index requirement)
   useEffect(() => {
     if (!userId) return;
     const q = query(
@@ -132,8 +182,6 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
       where('userId', '==', userId),
       where('status', '==', 'closed'),
       where('isPractice', '==', isPracticeMode),
-      orderBy('closedAt', 'desc'),
-      limit(50)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -142,7 +190,17 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
         tradeId: doc.id,
         ...doc.data()
       })) as ClosedTrade[];
+      // Sort client-side (newest first)
+      history.sort((a, b) => (b.closedAt || '').localeCompare(a.closedAt || ''));
       setTradeHistory(history);
+    }, (error) => {
+      console.error('[TRADES] History listener error, falling back to API:', error.message);
+      fetch(`/api/trade-history?userId=${userId}&isPractice=${isPracticeMode}&limit=50`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.history) setTradeHistory(data.history);
+        })
+        .catch(() => {});
     });
 
     return () => unsubscribe();
@@ -187,15 +245,19 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
     riskPercentage?: number,
     stopLossPrice?: number,
     takeProfitPrice?: number,
-    trailingStopDistance?: number
+    trailingStopDistance?: number,
+    profitTarget?: number
   }) => {
-    if (!userId) throw new Error("Not authenticated");
+    const effectiveUserId = userId || auth.currentUser?.uid || '';
+    console.log('[executeTrade] userId:', userId, 'effectiveUserId:', effectiveUserId, 'auth.currentUser?.uid:', auth.currentUser?.uid);
+    if (!effectiveUserId) throw new Error("Not authenticated");
     
     let quantity = params.quantity;
 
     // Dynamic Position Sizing
     if (params.riskPercentage && params.stopLossPrice) {
-      const riskAmount = portfolio.paperBalance * (Number(params.riskPercentage) / 100);
+      const activeBalance = isPracticeMode ? portfolio.paperBalance : (portfolio.liveBalance || 0);
+      const riskAmount = activeBalance * (Number(params.riskPercentage) / 100);
       const priceDiff = Math.abs(params.currentPrice - Number(params.stopLossPrice));
       if (priceDiff > 0) {
         quantity = riskAmount / priceDiff;
@@ -210,16 +272,17 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        userId,
+        userId: effectiveUserId,
         symbol: params.symbol,
         side: params.side,
         quantity,
         market: params.market || 'crypto',
-        mode: params.mode || 'copilot',
+        mode: params.profitTarget ? 'sentry' : (params.mode || (sentryConfig?.active ? 'sentry' : 'copilot')),
         isPractice: isPracticeMode,
         stopLossPrice: params.stopLossPrice,
         takeProfitPrice: params.takeProfitPrice,
-        trailingStopDistance: params.trailingStopDistance
+        trailingStopDistance: params.trailingStopDistance,
+        profitTarget: params.profitTarget
       })
     });
 
@@ -229,22 +292,27 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
     }
     
     return data;
-  }, [userId, portfolio.paperBalance, isPracticeMode]);
+  }, [userId, portfolio.paperBalance, isPracticeMode, sentryConfig]);
 
-  // Sentry Engine Loop
+  // UI-only Sentry Loop (Execution handled by backend Daemon)
   useEffect(() => {
     if (!sentryConfig?.active || !sentryConfig?.symbol) return;
+
+    if (sentryConfig.isAutonomous) {
+      addSentryLog('Autonomous Sentry Loop is running securely in the background Daemon...', 'info');
+      return;
+    }
 
     let isMounted = true;
     const interval = setInterval(async () => {
       if (!isMounted) return;
       
       try {
-        addSentryLog(`Fetching live price for ${sentryConfig.symbol}...`, 'info');
+        addSentryLog(`Syncing Daemon status for ${sentryConfig.symbol}...`, 'info');
         const res = await fetch(`/api/market-data?symbol=${encodeURIComponent(sentryConfig.symbol)}&broker=crypto`);
         const data = await res.json();
         
-        if (!data.price) throw new Error('Invalid price data');
+        if (!data.price) return;
         
         const currentPrice = data.price;
         const targetPrice = sentryConfig.targetPrice;
@@ -254,27 +322,14 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
         if (sentryConfig.condition === 'below' && currentPrice <= targetPrice) conditionMet = true;
 
         if (conditionMet) {
-          addSentryLog(`Condition met! ${sentryConfig.symbol} is ${currentPrice} (${sentryConfig.condition} ${targetPrice})`, 'action');
-          addSentryLog(`Executing ${sentryConfig.side.toUpperCase()} ${sentryConfig.quantity} ${sentryConfig.symbol}...`, 'action');
-          
-          await executeTrade({
-            symbol: sentryConfig.symbol,
-            side: sentryConfig.side,
-            quantity: sentryConfig.quantity,
-            currentPrice,
-            mode: 'sentry'
-          });
-          
-          addSentryLog(`Trade executed successfully. Deactivating Sentry Mode.`, 'success');
-          
-          // Deactivate Sentry
-          await updateDoc(doc(db, 'sentryConfigs', userId), { active: false });
+          addSentryLog(`Condition met! Backend executing ${sentryConfig.side.toUpperCase()}...`, 'action');
+          // Actual execution happens via engine/sentry.ts server-side.
         } else {
-          addSentryLog(`Price is ${currentPrice}. Condition (${sentryConfig.condition} ${targetPrice}) not met. Waiting...`, 'info');
+          addSentryLog(`Current: $${currentPrice}. Target: ${sentryConfig.condition} $${targetPrice}. Watching 24/7...`, 'info');
         }
         
       } catch (e: any) {
-        addSentryLog(`Error in Sentry loop: ${e.message}`, 'error');
+        // Silent catch for UI
       }
     }, 5000);
 
@@ -282,15 +337,16 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [sentryConfig, executeTrade, addSentryLog, userId]);
+  }, [sentryConfig, addSentryLog]);
 
   const closePosition = useCallback(async (tradeId: string, currentPrice?: number) => {
-    if (!userId) throw new Error("Not authenticated");
+    const effectiveUserId = userId || auth.currentUser?.uid || '';
+    if (!effectiveUserId) throw new Error("Not authenticated");
     
     const res = await fetch('/api/trade/close', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, tradeId })
+      body: JSON.stringify({ userId: effectiveUserId, tradeId })
     });
 
     const data = await res.json();
@@ -309,12 +365,13 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
   }, [userId]);
 
   const panicCloseAll = useCallback(async () => {
-    if (!userId) return [];
+    const effectiveUserId = userId || auth.currentUser?.uid || '';
+    if (!effectiveUserId) return [];
     
     const res = await fetch('/api/panic-close-all', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, isPracticeMode })
+      body: JSON.stringify({ userId: effectiveUserId, isPracticeMode })
     });
 
     const data = await res.json();
@@ -336,11 +393,44 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
     return data.results || [];
   }, [userId, isPracticeMode]);
 
-  // Calculate Daily PnL
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayStr = today.toISOString();
-  
+  const approveTrade = useCallback(async (tradeId: string) => {
+    const effectiveUserId = userId || auth.currentUser?.uid || '';
+    if (!effectiveUserId) throw new Error("Not authenticated");
+    
+    const res = await fetch('/api/trade/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: effectiveUserId, tradeId })
+    });
+
+    const data = await res.json();
+    if (data.error) {
+      throw new Error(data.error);
+    }
+
+    return data.executedTrade;
+  }, [userId]);
+
+  // Calculate Daily P&L — tracks date changes for midnight rollover
+  const [todayStr, setTodayStr] = useState(() => {
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    return now.toISOString();
+  });
+
+  useEffect(() => {
+    const checkDate = () => {
+      const now = new Date();
+      now.setHours(0, 0, 0, 0);
+      const newStr = now.toISOString();
+      if (newStr !== todayStr) {
+        setTodayStr(newStr);
+      }
+    };
+    const interval = setInterval(checkDate, 60000); // Check every minute
+    return () => clearInterval(interval);
+  }, [todayStr]);
+
   const dailyTrades = tradeHistory.filter(t => t.closedAt && t.closedAt >= todayStr);
   const dailyRealizedPnl = dailyTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
   const winCount = dailyTrades.filter(t => (t.pnl || 0) > 0).length;
@@ -349,6 +439,7 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
 
   return {
     positions,
+    pendingTrades,
     tradeHistory,
     portfolio,
     sentryConfig,
@@ -364,6 +455,7 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
     executeTrade,
     closePosition,
     panicCloseAll,
+    approveTrade,
     isLoading
   };
 }

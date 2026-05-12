@@ -1,8 +1,10 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Type, FunctionDeclaration } from '@google/genai';
 import { AudioRecorder, AudioPlayer } from '../utils/audioUtils';
 import { toast } from 'sonner';
 import { auth } from '../firebase';
+import type { PipelineActivity } from '../components/ActivityPipeline';
+import { memoryService } from '../services/memoryService';
 
 const setAlarmTool: FunctionDeclaration = {
   name: 'setAlarm',
@@ -45,17 +47,25 @@ const openAppTool: FunctionDeclaration = {
 
 const activateSentryModeTool: FunctionDeclaration = {
   name: 'activateSentryMode',
-  description: 'Activate Sentry Mode for autonomous trading. Set a specific condition and action for Jarvis to execute while monitoring.',
+  description: 'Activate Autonomous Sentry Mode. In this mode, Jarvis trades and exits positions FULLY AUTOMATICALLY with no user input required. No symbol or prompt is needed — Jarvis handles everything autonomously.',
   parameters: {
     type: Type.OBJECT,
     properties: {
-      symbol: { type: Type.STRING, description: 'The trading symbol to monitor (e.g., "BTC/USDT")' },
-      targetPrice: { type: Type.NUMBER, description: 'The target price to trigger the action' },
-      condition: { type: Type.STRING, description: 'The condition to trigger the action', enum: ['above', 'below'] },
-      side: { type: Type.STRING, description: 'The action to take when condition is met', enum: ['buy', 'sell'] },
-      quantity: { type: Type.NUMBER, description: 'The quantity to trade' }
+      maxDailyLoss: { type: Type.NUMBER, description: 'Optional maximum daily loss limit in dollars.' }
     },
-    required: ['symbol', 'targetPrice', 'condition', 'side', 'quantity']
+    required: []
+  }
+};
+
+const switchTradingModeTool: FunctionDeclaration = {
+  name: 'switchTradingMode',
+  description: 'Switch between Copilot Mode and Sentry Mode. Copilot = Jarvis asks you before placing or closing trades. Sentry = Jarvis acts fully autonomously. Use this when the user says "activate copilot mode", "switch to sentry", "turn on copilot", "go autonomous", etc.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      mode: { type: Type.STRING, description: 'The mode to switch to. Must be either "copilot" or "sentry".' }
+    },
+    required: ['mode']
   }
 };
 
@@ -83,9 +93,59 @@ const executeTradeTool: FunctionDeclaration = {
       riskPercentage: { type: Type.NUMBER, description: 'Risk percentage of total portfolio (e.g., 1 for 1%). Used for dynamic position sizing.' },
       stopLossPrice: { type: Type.NUMBER, description: 'The hard stop loss price.' },
       takeProfitPrice: { type: Type.NUMBER, description: 'The take profit price.' },
-      trailingStopDistance: { type: Type.NUMBER, description: 'The trailing stop distance in price units (e.g., 500 for a $500 trailing stop).' }
+      trailingStopDistance: { type: Type.NUMBER, description: 'The trailing stop distance in price units (e.g., 500 for a $500 trailing stop).' },
+      profitTarget: { type: Type.NUMBER, description: 'The desired profit in dollars (e.g., 10 for $10 profit). The system will auto-calculate the exact take-profit exit price. ALWAYS use this when the user specifies a dollar profit target.' },
+      investAmount: { type: Type.NUMBER, description: 'The dollar amount to invest in this trade (e.g., 5000 for $5000 worth). The system will auto-calculate the quantity. Use this when the user specifies a dollar amount to buy.' }
     },
     required: ['symbol', 'side']
+  }
+};
+
+const closePositionTool: FunctionDeclaration = {
+  name: 'closePosition',
+  description: 'Close entirely, or a fraction of, an existing open position.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      tradeId: { type: Type.STRING, description: 'The unique ID of the open position to close' }
+    },
+    required: ['tradeId']
+  }
+};
+
+const panicCloseAllTool: FunctionDeclaration = {
+  name: 'panicCloseAll',
+  description: 'Immediately liquidate and close ALL open positions across all markets. Use this ONLY in emergencies or when explicitly told to exit the market completely.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      dummy: { type: Type.STRING }
+    },
+    required: []
+  }
+};
+
+const studyWebsiteTool: FunctionDeclaration = {
+  name: 'studyWebsite',
+  description: 'Study, learn from, read, or memorize a specific website URL. Scrapes the page content, distills it into key knowledge with AI, and permanently saves it to the Vector DB memory bank. Use when the user asks to study, learn, memorize, or read any URL.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      url: { type: Type.STRING, description: 'The fully qualified URL to scrape and study (e.g., "https://example.com/trading-guide")' }
+    },
+    required: ['url']
+  }
+};
+
+const deepStudyWebsiteTool: FunctionDeclaration = {
+  name: 'deepStudyWebsite',
+  description: 'Deep study an entire website. Crawls ALL pages on the site, summarizes each one, and saves everything to memory. Use when the user says "deep study", "study the entire website", "learn everything from this site", "crawl the full website", or similar phrases indicating they want ALL pages studied, not just one.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      url: { type: Type.STRING, description: 'The starting URL of the website to deep crawl (e.g., "https://zerodha.com/varsity/")' }
+    },
+    required: ['url']
   }
 };
 
@@ -113,7 +173,7 @@ const getCurrentAppStateTool: FunctionDeclaration = {
     properties: {
       dummy: { type: Type.STRING, description: 'Optional dummy parameter' }
     },
-    required: ['dummy']
+    required: []
   }
 };
 
@@ -140,7 +200,7 @@ const reviewPortfolioTool: FunctionDeclaration = {
     properties: {
       dummy: { type: Type.STRING, description: 'Optional dummy parameter' }
     },
-    required: ['dummy']
+    required: []
   }
 };
 
@@ -225,20 +285,50 @@ const updateRiskSettingsTool: FunctionDeclaration = {
   }
 };
 
+const createTradingGoalTool: FunctionDeclaration = {
+  name: 'createTradingGoal',
+  description: 'Create a new autonomous trading goal to reach a specific target profit using a set amount of capital.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      targetProfit: { type: Type.NUMBER, description: 'The target profit amount in dollars (e.g., 15 for $15).' },
+      capital: { type: Type.NUMBER, description: 'The total capital to allocate to this goal in dollars (e.g., 10000).' },
+      isPractice: { type: Type.BOOLEAN, description: 'Whether this goal should use practice money (paper wallet) or real money. Default is true (practice mode).' },
+      symbol: { type: Type.STRING, description: 'Optional. The specific coin to trade if the user mentions one (e.g., "DOGE/USDT"). If omitted, the system will autonomously scan and pick the best coin.' }
+    },
+    required: ['targetProfit', 'capital', 'isPractice']
+  }
+};
+
 export function useJarvisLive(
   executeTradeFn?: (params: any) => Promise<any>,
+  closePositionFn?: (tradeId: string) => Promise<any>,
+  panicCloseAllFn?: () => Promise<any>,
   getMarketPriceFn?: (symbol: string) => Promise<any>,
   onNavigate?: (destination: string) => void,
   getAppState?: () => string,
-  onHighlight?: (elementId: string) => void
+  onHighlight?: (elementId: string) => void,
+  memoryModel?: string
 ) {
   const [isConnecting, setIsConnecting] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [isSessionReady, setIsSessionReady] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isMicActive, setIsMicActive] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [volume, setVolume] = useState(0);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<{role: string, text: string, timestamp: string}[]>([]);
+  const [tradingMode, setTradingMode] = useState<'sentry' | 'copilot'>(() => {
+    return (localStorage.getItem('jarvis_trading_mode') as 'sentry' | 'copilot') || 'copilot';
+  });
+  const currentSessionIdRef = useRef<string | null>(null);
+  const [pipelineActivity, setPipelineActivity] = useState<PipelineActivity>({
+    jarvis: 'idle',
+    memory: 'idle',
+    action: 'idle',
+  });
 
   const sessionRef = useRef<any>(null);
   const recorderRef = useRef<AudioRecorder | null>(null);
@@ -246,6 +336,49 @@ export function useJarvisLive(
   const videoStreamRef = useRef<MediaStream | null>(null);
   const videoIntervalRef = useRef<number | null>(null);
   const lastSpeakerRef = useRef<'user' | 'jarvis' | null>(null);
+  const lastInputSourceRef = useRef<'voice' | 'text'>('voice');
+  const memoryModelRef = useRef<string>(memoryModel || 'gemini-2.0-flash');
+  const jarvisTextAccumulatorRef = useRef<string>('');
+
+  // Keep the ref in sync when the prop changes
+  useEffect(() => {
+    memoryModelRef.current = memoryModel || 'gemini-2.0-flash';
+  }, [memoryModel]);
+
+  // Helper to set pipeline activity with auto-clear
+  const setPipelineAction = useCallback((action: PipelineActivity['action'], label?: string, color?: string) => {
+    setPipelineActivity(prev => ({
+      ...prev,
+      action,
+      actionLabel: label,
+      actionColor: color,
+      memory: action !== 'idle' ? 'recalling' : 'idle',
+    }));
+  }, []);
+
+  const clearPipelineAction = useCallback((successLabel?: string) => {
+    if (successLabel) {
+      setPipelineActivity(prev => ({
+        ...prev,
+        memory: 'complete',
+        memoryLabel: successLabel,
+      }));
+      setTimeout(() => {
+        setPipelineActivity({
+          jarvis: 'idle',
+          memory: 'idle',
+          action: 'idle',
+        });
+      }, 3000);
+    } else {
+      setPipelineActivity({
+        jarvis: 'idle',
+        memory: 'idle',
+        action: 'idle',
+      });
+    }
+  }, []);
+
 
   const toggleMic = useCallback(async () => {
     if (!isConnected || !recorderRef.current) return;
@@ -265,12 +398,80 @@ export function useJarvisLive(
     }
   }, [isConnected, isMicActive]);
 
-  const startSession = useCallback(async (memoryContext: string, enableScreenShare: boolean, enableSearch: boolean, personality: 'classic' | 'sarcastic' | 'scientific' = 'classic', initialMessage?: string, enableMic: boolean = true) => {
+  const saveMessageToSession = useCallback(async (role: string, text: string, source: string = 'text') => {
+    const sid = currentSessionIdRef.current;
+    if (!sid || !text.trim()) return;
+    try {
+      await fetch(`/api/sessions/${sid}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role, text: text.trim(), source })
+      });
+    } catch (e) {
+      console.warn('Failed to save message to session:', e);
+    }
+  }, []);
+
+  const loadSession = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/messages`);
+      const data = await res.json();
+      if (data.status === 'success') {
+        setCurrentSessionId(sessionId);
+        currentSessionIdRef.current = sessionId;
+        setChatMessages(data.messages);
+        // Rebuild transcript from messages
+        const rebuilt = data.messages.map((m: any) => {
+          const icon = m.role === 'user' ? (m.source === 'voice' ? '🎤' : '⌨️') : '🤖';
+          return `${icon} ${m.role === 'user' ? 'You' : 'Jarvis'}: ${m.text}`;
+        }).join('\n\n');
+        setTranscript(rebuilt);
+      }
+    } catch (e) {
+      console.error('Failed to load session:', e);
+    }
+  }, []);
+
+  const sendSystemUpdate = useCallback((message: string) => {
+    if (!isSessionReady || !sessionRef.current) return;
+    // Send a silent system context update (not shown in transcript)
+    try {
+      sessionRef.current.sendClientContent({
+        turns: [{ role: 'user', parts: [{ text: `[SYSTEM UPDATE — Do not repeat this to the user, just silently update your internal state]: ${message}` }] }],
+        turnComplete: true
+      });
+    } catch (e) {
+      console.warn('[JARVIS] Failed to send system update:', e);
+    }
+  }, [isSessionReady]);
+
+  const startSession = useCallback(async (memoryContext: string, enableScreenShare: boolean, enableSearch: boolean, personality: 'classic' | 'sarcastic' | 'scientific' = 'classic', initialMessage?: string, enableMic: boolean = true, liveModel?: string, isPracticeMode: boolean = true, currentTradingMode: string = 'copilot', portfolioState?: { balance: number; todayPnl: number; openPositions: number; realizedPnl: number; unrealizedPnl: number }, brokerStatus?: string) => {
     if (isConnected || isConnecting) return;
 
     setIsConnecting(true);
-    setTranscript('');
     lastSpeakerRef.current = null;
+    jarvisTextAccumulatorRef.current = '';
+
+    // Only create a new Firestore session if we don't have one yet
+    if (!currentSessionIdRef.current) {
+      try {
+        const userId = (await import('../firebase')).auth.currentUser?.uid;
+        if (userId) {
+          const res = await fetch('/api/sessions/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId, firstMessage: initialMessage || '' })
+          });
+          const data = await res.json();
+          if (data.status === 'success') {
+            setCurrentSessionId(data.sessionId);
+            currentSessionIdRef.current = data.sessionId;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to create chat session:', e);
+      }
+    }
 
     recorderRef.current = new AudioRecorder();
     playerRef.current = new AudioPlayer();
@@ -330,9 +531,77 @@ export function useJarvisLive(
         scientific: 'You are Jarvis, acting as a deep scientific researcher. You are extremely analytical, use technical terminology, and focus on data and logic.'
       };
 
-      const systemInstruction = `${personalityInstructions[personality]} You have access to the user's screen if they shared it, and you can see what they are looking at. You also have access to past conversation summaries to maintain context.
+      // Fetch Jarvis's soul (full self-awareness document)
+      let soulContent = '';
+      try {
+        const soulRes = await fetch('/api/jarvis-mind');
+        const soulData = await soulRes.json();
+        if (soulData.mind?.soul) soulContent = soulData.mind.soul;
+      } catch { }
+
+      // Fetch Morning Briefing data (alerts, P&L, loss debriefs)
+      let morningBriefing = '';
+      try {
+        const userId = (await import('../firebase')).auth.currentUser?.uid;
+        if (userId) {
+          const briefingRes = await fetch(`/api/briefing?userId=${userId}`);
+          const briefingData = await briefingRes.json();
+          if (briefingData.status === 'success' && briefingData.briefing) {
+            const b = briefingData.briefing;
+            const parts: string[] = [];
+
+            // P&L summary
+            if (b.todayWins > 0 || b.todayLosses > 0) {
+              parts.push(`Today's trading: ${b.todayWins} wins, ${b.todayLosses} losses, total P&L: $${b.todayPnl.toFixed(2)}. ${b.isPracticeMode !== false ? `Paper balance: $${b.paperBalance.toFixed(2)}` : `Live USDT balance: $${(b.liveBalance || 0).toFixed(2)}`}.`);
+            }
+            if (b.openPositions > 0) {
+              parts.push(`You have ${b.openPositions} open position(s) being monitored.`);
+            }
+
+            // Market alerts
+            if (b.alerts && b.alerts.length > 0) {
+              parts.push(`Market alerts while you were away: ${b.alerts.join(' | ')}`);
+            }
+
+            // Loss debriefs
+            if (b.lossDebriefs && b.lossDebriefs.length > 0) {
+              const debriefs = b.lossDebriefs.map((d: any) => 
+                `Lost $${Math.abs(d.pnl).toFixed(2)} on ${d.symbol}. Lesson: ${d.lesson}`
+              ).join(' ');
+              parts.push(`Recent loss debrief: ${debriefs}`);
+            }
+
+            if (parts.length > 0) {
+              morningBriefing = `\n\n[MORNING BRIEFING — Proactively share this with the user when they first speak to you. Keep it concise, 2-3 sentences max. Start with "Here's your update:" or "Quick briefing:"]\n${parts.join('\n')}`;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to fetch briefing:', e);
+      }
+
+      const systemInstruction = `${personalityInstructions[personality]}
+
+${soulContent}
+
+You have access to the user's screen if they shared it, and you can see what they are looking at. You also have access to past conversation summaries to maintain context.
       
 If the user shares their screen and asks you to analyze a chart, act as an expert technical analyst. Look at the candlestick patterns, trend lines, support/resistance levels, and indicators visible on the screen. Provide a detailed breakdown of the market structure (e.g., Bull Flags, Head and Shoulders, breakouts) and suggest potential trade setups based on the visual data.
+
+[CURRENT MODE — CRITICAL: You MUST use these values. NEVER ask the user what mode they are in.]
+Trading Mode: ${isPracticeMode ? 'PRACTICE (Paper Trading)' : 'LIVE (Real Money)'}
+Execution Mode: ${currentTradingMode === 'sentry' ? 'SENTRY (Fully Automatic — execute and close trades without asking)' : 'COPILOT (Ask user before every trade)'}
+When placing trades via executeTrade or createTradingGoal, ALWAYS set isPractice=${isPracticeMode}. Do NOT ask the user to confirm the mode — you already know it.
+
+[LIVE PORTFOLIO STATE]
+Current Balance: $${portfolioState ? portfolioState.balance.toFixed(2) : 'unknown'}
+Today's P&L: $${portfolioState ? portfolioState.todayPnl.toFixed(2) : 'unknown'}
+Open Positions: ${portfolioState ? portfolioState.openPositions : 'unknown'}
+Realized P&L: $${portfolioState ? portfolioState.realizedPnl.toFixed(2) : 'unknown'}
+Unrealized P&L: $${portfolioState ? portfolioState.unrealizedPnl.toFixed(2) : 'unknown'}
+
+[BROKER STATUS]
+${brokerStatus || 'No broker connected. Paper trading only.'}
 
 User Location: ${location ? `Lat: ${location.lat}, Lng: ${location.lng}` : 'Unknown'}
 Past Context:
@@ -344,14 +613,20 @@ If the user asks for technical analysis, indicators (RSI, MACD, EMAs), or trend 
 If the user asks to backtest a strategy (like RSI or MACD) on historical data, use the backtestStrategy tool.
 If the user asks to optimize a strategy or find the most profitable settings/parameters for a strategy, use the optimizeStrategy tool.
 If the user asks to update their risk management settings (like max daily loss, position size, or auto-liquidate threshold), use the updateRiskSettings tool.
-If the user asks to buy or sell, use the executeTrade tool.
-If the user asks you to start trading autonomously or go to sleep while managing trades, use the activateSentryMode tool.
+If the user asks to buy or sell, use the executeTrade tool. CRITICAL: When the user specifies a dollar profit target (e.g., "make me $10 profit"), you MUST pass it as the profitTarget parameter. When the user specifies a dollar amount to invest (e.g., "buy $5000 worth of DOGE"), you MUST pass it as the investAmount parameter.
+TRADING MODES — CRITICAL: You have two trading modes. Do NOT ask for a symbol or any extra information to switch modes.
+- SENTRY MODE: Jarvis trades and exits FULLY AUTOMATICALLY. No user approval needed. When the user says "activate sentry mode", "turn on sentry", "go autonomous", "trade automatically", or similar → call switchTradingMode with mode="sentry". Confirm: "Sentry mode activated. I'll handle everything automatically."
+- COPILOT MODE: Jarvis asks the user before placing or closing any trade. When the user says "activate copilot mode", "turn on copilot", "ask me before trading", or similar → call switchTradingMode with mode="copilot". Confirm: "Copilot mode activated. I'll check with you before doing anything."
+If the user asks to start an autonomous learning loop or practice trading session, use the activateSentryMode tool.
 If the user asks to see their history, settings, market, chart, analytics, or home, use the navigateApp tool.
 If you need to know what the user is currently looking at, use the getCurrentAppState tool.
 If the user asks where something is or how to do something, use the highlightElement tool to point it out.
 If the user asks to review their portfolio or trading performance, use the reviewPortfolio tool.
 If the user asks for market sentiment or news about an asset, use the analyzeSentiment tool.
 If the user asks about whale activity or large transactions, use the getWhaleActivity tool.
+If the user asks you to study, learn, memorize, or read a website URL, use the studyWebsite tool. This scrapes the content and saves it to your memory.
+If the user says "deep study", "study the entire website", "learn everything from this site", "crawl the full site", or anything indicating they want ALL pages on a website studied (not just one page), use the deepStudyWebsite tool. This crawls every page on the site, summarizes each one, and saves them all to memory. Warn the user this may take a few minutes for large sites.
+If the user asks you to make a profit or reach a specific financial target using a set amount of capital WITHOUT specifying exactly when to enter (e.g., "make me a profit of $9 using $5,000", "make me $10 on DOGE"), use the createTradingGoal tool. The system will automatically scan the market, pick the best coin (if not specified), and execute the trade autonomously.
 Available element IDs:
 - "panic-button": The big red panic close all button
 - "settings-button": The key icon for broker API settings
@@ -359,17 +634,24 @@ Available element IDs:
 - "mic-button": The microphone icon for wake word
 - "screen-share-button": The monitor icon for screen vision
 - "tab-home", "tab-market", "tab-chart", "tab-history", "tab-settings": The top navigation tabs
-- "dashboard-summary": The bottom dashboard bar showing P&L and active positions`;
+- "dashboard-summary": The bottom dashboard bar showing P&L and active positions
+${morningBriefing}`;
 
       const sessionPromise = ai.live.connect({
-        model: 'gemini-3.1-flash-live-preview',
+        model: liveModel || 'gemini-3.1-flash-live-preview',
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
           },
+          contextWindowCompression: {
+            triggerTokens: '80000' as any,
+            slidingWindow: {
+              targetTokens: '40000' as any,
+            },
+          },
           tools: [
-            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, getMarketPriceTool, executeTradeTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool] }
+            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, switchTradingModeTool, getMarketPriceTool, executeTradeTool, closePositionTool, panicCloseAllTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool, studyWebsiteTool, deepStudyWebsiteTool, createTradingGoalTool] }
           ],
           systemInstruction: systemInstruction,
           inputAudioTranscription: {},
@@ -381,13 +663,18 @@ Available element IDs:
             setIsConnecting(false);
             setIsListening(true);
 
+            // Mark session fully ready after promise resolves
+            sessionPromise.then(() => setIsSessionReady(true)).catch(() => {});
+
             if (initialMessage) {
+              lastInputSourceRef.current = 'text';
               const prefix = '\n';
-              setTranscript((prev) => prev + (prev && prefix ? prefix : '') + 'User: ' + initialMessage);
+              setTranscript((prev) => prev + (prev && prefix ? prefix : '') + '⌨️ You: ' + initialMessage);
               lastSpeakerRef.current = 'user';
+              saveMessageToSession('user', initialMessage, 'text');
               sessionPromise.then((session) => {
-                session.sendClientContent({ turns: initialMessage, turnComplete: true });
-              });
+                session.sendClientContent({ turns: [{ role: 'user', parts: [{ text: initialMessage }] }], turnComplete: true });
+              }).catch(() => {});
             }
 
             recorderRef.current!.onData = (base64Data) => {
@@ -395,7 +682,7 @@ Available element IDs:
                 session.sendRealtimeInput({
                   audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' },
                 });
-              });
+              }).catch(() => {});
             };
 
             if (videoStreamRef.current) {
@@ -428,12 +715,62 @@ Available element IDs:
             }
           },
           onmessage: async (message: LiveServerMessage) => {
+            // DEBUG: Log all message keys to find where function calls come through
+            const msgKeys = Object.keys(message || {});
+            if (msgKeys.length > 0) {
+              const hasToolCall = !!(message as any).toolCall;
+              const hasFunctionCall = message.serverContent?.modelTurn?.parts?.some((p: any) => p.functionCall);
+              const hasTurnComplete = !!message.serverContent?.turnComplete;
+              const hasAudio = message.serverContent?.modelTurn?.parts?.some((p: any) => p.inlineData?.data);
+              const hasText = message.serverContent?.modelTurn?.parts?.some((p: any) => p.text);
+              if (hasToolCall || hasFunctionCall || hasText || hasTurnComplete) {
+                console.log('[MSG]', JSON.stringify({
+                  keys: msgKeys,
+                  hasToolCall,
+                  hasFunctionCall,
+                  hasTurnComplete,
+                  hasText,
+                  parts: message.serverContent?.modelTurn?.parts?.map((p: any) => ({
+                    hasFunctionCall: !!p.functionCall,
+                    hasText: !!p.text,
+                    functionCallName: p.functionCall?.name,
+                  })),
+                }));
+              }
+            }
+
+            // Handle toolCall at top level (newer API path)
+            // The Live API sends tool calls through message.toolCall, NOT through
+            // message.serverContent.modelTurn.parts[].functionCall
+            if ((message as any).toolCall) {
+              const toolCallMsg = (message as any).toolCall;
+              console.log('[TOOL CALL via message.toolCall]', JSON.stringify(toolCallMsg));
+              if (toolCallMsg.functionCalls) {
+                // Synthesize into serverContent.modelTurn.parts so the existing handler below processes them
+                if (!message.serverContent) {
+                  (message as any).serverContent = {};
+                }
+                if (!message.serverContent!.modelTurn) {
+                  (message as any).serverContent!.modelTurn = { parts: [] };
+                }
+                for (const fc of toolCallMsg.functionCalls) {
+                  message.serverContent!.modelTurn!.parts!.push({ functionCall: fc } as any);
+                }
+              }
+            }
+
             if (message.serverContent?.interrupted) {
               playerRef.current?.stop();
               setIsSpeaking(false);
+              setVolume(0);
             }
 
             if (message.serverContent?.turnComplete) {
+              // Save any accumulated Jarvis text to chat history
+              if (jarvisTextAccumulatorRef.current.trim()) {
+                saveMessageToSession('jarvis', jarvisTextAccumulatorRef.current.trim(), 'text');
+                jarvisTextAccumulatorRef.current = '';
+              }
               // Add a small delay to let the audio finish playing before stopping the animation
               setTimeout(() => setIsSpeaking(false), 1000);
             }
@@ -446,13 +783,15 @@ Available element IDs:
                 }
                 if (part.text) {
                   const text = part.text;
-                  const prefix = lastSpeakerRef.current !== 'jarvis' ? '\n\nJarvis: ' : '';
-                  setTranscript((prev) => prev + (prev && prefix ? prefix : (prefix ? 'Jarvis: ' : '')) + text);
+                  const prefix = lastSpeakerRef.current !== 'jarvis' ? '\n\n🤖 Jarvis: ' : '';
+                  setTranscript((prev) => prev + (prev && prefix ? prefix : (prefix ? '🤖 Jarvis: ' : '')) + text);
                   lastSpeakerRef.current = 'jarvis';
+                  jarvisTextAccumulatorRef.current += text;
                 }
                 if (part.functionCall) {
                   const call = part.functionCall;
                   let response = {};
+                  console.log('[TOOL CALL]', call.name, call.args);
                   
                   if (call.name === 'setAlarm') {
                     const { time, label } = call.args as any;
@@ -471,50 +810,87 @@ Available element IDs:
                     window.open(url, '_blank');
                     response = { status: 'success', message: `Opened ${appName} at ${url}` };
                   } else if (call.name === 'activateSentryMode') {
-                    const { symbol, targetPrice, condition, side, quantity } = call.args as any;
+                    setPipelineAction('sentry', 'Sentry activating...', '#ef4444');
+                    const { symbol, autonomousPrompt, maxDailyLoss } = call.args as any;
                     try {
-                      const { doc, setDoc } = await import('firebase/firestore');
-                      const { db, auth } = await import('../firebase');
-                      if (auth.currentUser) {
-                        await setDoc(doc(db, 'sentryConfigs', auth.currentUser.uid), {
-                          active: true,
+                      const effectiveUserId = auth.currentUser?.uid;
+                      if (!effectiveUserId) throw new Error('Not logged in');
+
+                      const res = await fetch('/api/sentry/activate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          userId: effectiveUserId,
                           symbol,
-                          targetPrice,
-                          condition,
-                          side,
-                          quantity,
-                          updatedAt: new Date().toISOString()
-                        });
-                      }
-                      toast.success(`Sentry Mode Activated! Monitoring ${symbol} to ${side} ${quantity} if price goes ${condition} $${targetPrice}`, {
+                          autonomousPrompt,
+                          maxDailyLoss
+                        })
+                      });
+                      const data = await res.json();
+                      if (!res.ok) throw new Error(data.error || 'Server error');
+
+                      toast.success(`Sentry Mode Activated! Jarvis is now in autonomous mode.`, {
                         style: { backgroundColor: '#a855f7', color: 'white', border: 'none' },
                         duration: 5000
                       });
-                      response = { status: 'success', message: `Sentry Mode activated for ${symbol}` };
+                      setPipelineActivity(prev => ({ ...prev, actionLabel: `Autonomous Mode` }));
+                      response = { status: 'success', message: `Autonomous learning loop started.` };
                     } catch (e: any) {
-                      toast.error('Failed to activate Sentry Mode');
-                      response = { status: 'error', message: 'Failed to activate Sentry Mode' };
+                      console.error('Sentry Activation Error:', e);
+                      toast.error(`Failed: ${e.message || 'Unknown error'}`);
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to activate Sentry Mode: ${e.message}` };
+                    }
+                  } else if (call.name === 'switchTradingMode') {
+                    const { mode } = call.args as any;
+                    try {
+                      // Save the preference so new trades pick it up
+                      localStorage.setItem('jarvis_trading_mode', mode);
+                      setTradingMode(mode);
+                      if (mode === 'sentry') {
+                        setPipelineAction('sentry', 'Sentry Mode Active', '#a855f7');
+                        toast.success('⚡ Sentry Mode activated. Jarvis will trade and exit fully automatically.', {
+                          style: { backgroundColor: '#a855f7', color: 'white', border: 'none' },
+                          duration: 5000
+                        });
+                      } else {
+                        setPipelineAction('copilot', 'Copilot Mode Active', '#06b6d4');
+                        toast.success('🧑‍✈️ Copilot Mode activated. Jarvis will ask before doing anything.', {
+                          style: { backgroundColor: '#0e7490', color: 'white', border: 'none' },
+                          duration: 5000
+                        });
+                      }
+                      response = { status: 'success', mode, message: `Switched to ${mode} mode.` };
+                    } catch (e: any) {
+                      response = { status: 'error', message: e.message };
                     }
                   } else if (call.name === 'getMarketPrice') {
                     const { symbol } = call.args as any;
+                    setPipelineAction('market-analysis', `Fetching ${symbol}...`, '#22c55e');
                     try {
                       const res = await fetch(`/api/market-data?symbol=${encodeURIComponent(symbol)}&broker=crypto`);
                       const data = await res.json();
+                      clearPipelineAction('✓ Price fetched');
                       response = { status: 'success', price: data.price, change: data.change, symbol: data.symbol };
                     } catch (e) {
+                      clearPipelineAction();
                       response = { status: 'error', message: 'Failed to fetch market price' };
                     }
                   } else if (call.name === 'analyzeMarket') {
                     const { symbol, timeframe } = call.args as any;
+                    setPipelineAction('market-analysis', `Analyzing ${symbol}...`, '#22c55e');
                     try {
                       const res = await fetch(`/api/analysis?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`);
                       const data = await res.json();
+                      clearPipelineAction('✓ Analysis done');
                       response = data;
                     } catch (e) {
+                      clearPipelineAction();
                       response = { status: 'error', message: 'Failed to fetch market analysis' };
                     }
                   } else if (call.name === 'backtestStrategy') {
                     const { symbol, timeframe, strategy, initialBalance } = call.args as any;
+                    setPipelineAction('backtesting', `Backtesting ${strategy}...`, '#f97316');
                     try {
                       const res = await fetch('/api/backtest', {
                         method: 'POST',
@@ -522,8 +898,10 @@ Available element IDs:
                         body: JSON.stringify({ symbol, timeframe, strategy, initialBalance })
                       });
                       const data = await res.json();
+                      clearPipelineAction('✓ Backtest done');
                       response = data;
                     } catch (e) {
+                      clearPipelineAction();
                       response = { status: 'error', message: 'Failed to run backtest' };
                     }
                   } else if (call.name === 'optimizeStrategy') {
@@ -573,8 +951,47 @@ Available element IDs:
                     } catch (e) {
                       response = { status: 'error', message: 'Failed to update risk settings' };
                     }
+                  } else if (call.name === 'createTradingGoal') {
+                    const { targetProfit, capital, isPractice, symbol: goalSymbol } = call.args as any;
+                    setPipelineAction('trading', `Creating Goal: $${targetProfit} profit...`, '#a855f7');
+                    try {
+                      const { auth } = await import('../firebase');
+                      if (auth.currentUser) {
+                        const res = await fetch('/api/goals/create', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ 
+                            userId: auth.currentUser.uid, 
+                            targetProfit, 
+                            capital, 
+                            isPractice,
+                            symbol: goalSymbol
+                          })
+                        });
+                        const data = await res.json();
+                        if (res.ok && data.status === 'success') {
+                          const coinInfo = data.tradeInfo ? `\nAuto-trade executed: ${data.tradeInfo.side.toUpperCase()} ${data.tradeInfo.symbol} at $${data.tradeInfo.entryPrice}` : '';
+                          const msg = `Goal Created: $${targetProfit} profit using $${capital} (${isPractice ? 'Practice' : 'Real'} Mode)${coinInfo}`;
+                          toast.success(msg, {
+                            style: { backgroundColor: '#a855f7', color: 'white', border: 'none', whiteSpace: 'pre-line' }
+                          });
+                          clearPipelineAction('✓ Goal Active');
+                          response = { status: 'success', message: `Trading goal set successfully. ${data.tradeInfo ? `I automatically picked ${data.tradeInfo.symbol} and entered the trade.` : `I will monitor the market.`}` };
+                        } else {
+                          throw new Error(data.error || 'Failed to create goal');
+                        }
+                      } else {
+                        response = { status: 'error', message: 'User not authenticated' };
+                      }
+                    } catch (e: any) {
+                      toast.error(`Failed to create goal: ${e.message}`);
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to create trading goal: ${e.message}` };
+                    }
                   } else if (call.name === 'executeTrade') {
-                    const { symbol, side, quantity, riskPercentage, stopLossPrice, takeProfitPrice, trailingStopDistance } = call.args as any;
+                    const { symbol, side, riskPercentage, stopLossPrice, takeProfitPrice, trailingStopDistance, profitTarget, investAmount } = call.args as any;
+                    let { quantity } = call.args as any;
+                    setPipelineAction('trading', `${side?.toUpperCase()} ${symbol}...`, '#f59e0b');
                     try {
                       if (executeTradeFn) {
                         // Fetch current price first
@@ -587,26 +1004,46 @@ Available element IDs:
                           console.warn('Failed to fetch real price for trade, using mock', e);
                         }
 
+                        // Auto-calculate quantity from investAmount
+                        if (investAmount && currentPrice > 0 && !quantity) {
+                           quantity = investAmount / currentPrice;
+                           console.log(`[TRADE] Auto-calculated quantity from $${investAmount} investAmount: ${quantity}`);
+                        }
+
+                        // Auto-calculate takeProfitPrice from dollar profitTarget
+                        let effectiveTakeProfitPrice = takeProfitPrice;
+                        if (profitTarget && !takeProfitPrice && quantity && currentPrice) {
+                          if (side === 'buy') {
+                            effectiveTakeProfitPrice = currentPrice + (profitTarget / quantity);
+                          } else {
+                            effectiveTakeProfitPrice = currentPrice - (profitTarget / quantity);
+                          }
+                          console.log(`[TRADE] Auto-calculated TP from $${profitTarget} profit target: $${effectiveTakeProfitPrice.toFixed(4)}`);
+                        }
+
                         const result = await executeTradeFn({
                           symbol,
                           side,
                           quantity,
                           riskPercentage,
                           stopLossPrice,
-                          takeProfitPrice,
+                          takeProfitPrice: effectiveTakeProfitPrice,
                           trailingStopDistance,
-                          currentPrice
+                          currentPrice,
+                          profitTarget
                         });
                         toast.success(`Trade Executed: ${side.toUpperCase()} ${result.quantity} ${symbol} @ $${currentPrice}`, {
                           style: { backgroundColor: side.toLowerCase() === 'buy' ? '#22c55e' : '#ef4444', color: 'white', border: 'none' },
                           duration: 5000
                         });
+                        clearPipelineAction('✓ Order filled!');
                         response = { status: 'success', message: `Trade executed: ${side} ${result.quantity} ${symbol} at $${currentPrice}` };
                       } else {
                         throw new Error('Trade execution not available on client');
                       }
                     } catch (e: any) {
                       toast.error(`Trade Failed: ${e.message}`);
+                      clearPipelineAction();
                       response = { status: 'error', message: `Failed to execute trade: ${e.message}` };
                     }
                   } else if (call.name === 'navigateApp') {
@@ -633,25 +1070,298 @@ Available element IDs:
                       response = { status: 'error', message: 'Highlighting not supported' };
                     }
                   } else if (call.name === 'reviewPortfolio') {
+                    setPipelineAction('portfolio-review', 'Reviewing...', '#14b8a6');
                     if (onNavigate) {
                       onNavigate('analytics');
                     }
+                    clearPipelineAction('✓ Portfolio reviewed');
                     response = { status: 'success', message: 'Navigated to analytics dashboard. Please analyze the user\'s performance based on the data you see on the screen.' };
+                  } else if (call.name === 'closePosition') {
+                    const { tradeId } = call.args as any;
+                    setPipelineAction('trading', 'Closing position...', '#f59e0b');
+                    try {
+                      if (closePositionFn) {
+                        const result = await closePositionFn(tradeId);
+                        toast.success(`Position ${tradeId} closed.`, {
+                          style: { backgroundColor: '#f59e0b', color: 'white', border: 'none' },
+                        });
+                        clearPipelineAction('✓ Position closed');
+                        response = { status: 'success', message: `Position ${tradeId} closed successfully`, result };
+                      } else {
+                        response = { status: 'error', message: 'Close position function not available' };
+                      }
+                    } catch (e: any) {
+                      toast.error(`Failed to close position: ${e.message}`);
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to close position: ${e.message}` };
+                    }
+                  } else if (call.name === 'panicCloseAll') {
+                    try {
+                      if (panicCloseAllFn) {
+                        await panicCloseAllFn();
+                        toast.error('PANIC: All positions closed!', {
+                          style: { backgroundColor: '#ef4444', color: 'white', border: 'none' },
+                          duration: 5000
+                        });
+                        response = { status: 'success', message: 'All positions have been closed' };
+                      } else {
+                        response = { status: 'error', message: 'Panic close function not available' };
+                      }
+                    } catch (e: any) {
+                      response = { status: 'error', message: `Failed to close all positions: ${e.message}` };
+                    }
+                  } else if (call.name === 'studyWebsite') {
+                    const { url } = call.args as any;
+                    const hostname = (() => { try { return new URL(url).hostname; } catch { return url; } })();
+                    setPipelineAction('web-learning', `Scraping ${hostname}...`, '#22d3ee');
+                    toast.info(`Studying ${url}...`);
+                    try {
+                      const { auth } = await import('../firebase');
+                      if (auth.currentUser) {
+                        // Use AbortController for timeout safety
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+
+                        try {
+                          console.log('[studyWebsite] Fetching /api/memory/study-stream...');
+                          const res = await fetch('/api/memory/study-stream', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ url, userId: auth.currentUser.uid, model: memoryModelRef.current }),
+                            signal: controller.signal,
+                          });
+
+                          console.log('[studyWebsite] fetch returned status=', res.status, 'body=', !!res.body);
+
+                          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                          if (!res.body) throw new Error('No response body for SSE stream');
+
+                          const reader = res.body.getReader();
+                          const decoder = new TextDecoder();
+                          let summary = '';
+                          let hadError = false;
+
+                          try {
+                            while (true) {
+                              const { done, value } = await reader.read();
+                              console.log('[studyWebsite] reader.read() done=', done, 'bytes=', value?.length);
+                              if (done) break;
+                              const text = decoder.decode(value, { stream: true });
+                              console.log('[studyWebsite] SSE chunk:', text.substring(0, 200));
+                              const lines = text.split('\n').filter(l => l.startsWith('data: '));
+                              for (const line of lines) {
+                                try {
+                                  const progress = JSON.parse(line.replace('data: ', ''));
+                                  // Handle error stage from server
+                                  if (progress.stage === 'error') {
+                                    hadError = true;
+                                    throw new Error(progress.message || 'Study failed on server');
+                                  }
+                                  setPipelineActivity(prev => ({
+                                    ...prev,
+                                    action: 'web-learning',
+                                    memory: progress.stage === 'complete' ? 'complete' : 'storing',
+                                    memoryProgress: progress.progress,
+                                    memoryLabel: progress.stage === 'complete'
+                                      ? '✓ Learned!'
+                                      : `Learning ${progress.progress}%`,
+                                    actionLabel: progress.message,
+                                  }));
+                                  if (progress.summary) summary = progress.summary;
+                                } catch (parseErr: any) {
+                                  if (hadError) throw parseErr;
+                                  /* skip malformed SSE lines */
+                                }
+                              }
+                            }
+                          } finally {
+                            reader.releaseLock();
+                          }
+
+                          clearTimeout(timeoutId);
+                          toast.success(`Learned from ${url}!`);
+                          
+                          // Push to UI cache so it appears in the Brain modal immediately
+                          memoryService.localCache.unshift({
+                            id: crypto.randomUUID(),
+                            timestamp: Date.now(),
+                            summary: `Knowledge acquired from [${url}]:\n${summary}`,
+                            type: 'conversation' // Or create a new type like 'web_knowledge' if you prefer, but 'conversation' matches the CSS styles
+                          });
+
+                          clearPipelineAction('✓ Learned!');
+                          response = { status: 'success', summary, message: `Successfully studied and memorized content from ${url}` };
+                          console.log('[studyWebsite] SUCCESS, summary length=', summary.length);
+                        } catch (streamErr: any) {
+                          clearTimeout(timeoutId);
+                          console.error('[studyWebsite] Stream error:', streamErr.message);
+                          throw streamErr;
+                        }
+                      } else {
+                        console.warn('[studyWebsite] No current user!');
+                        clearPipelineAction();
+                        response = { status: 'error', message: 'User not authenticated' };
+                      }
+                    } catch (e: any) {
+                      clearPipelineAction();
+                      console.error('[studyWebsite] FINAL catch:', e.message);
+                      response = { status: 'error', message: `Failed to study website: ${e.message}` };
+                    }
+                  } else if (call.name === 'deepStudyWebsite') {
+                    const { url } = call.args as any;
+                    const hostname = (() => { try { return new URL(url).hostname; } catch { return url; } })();
+                    setPipelineAction('web-learning', `Deep Study: Scanning ${hostname}...`, '#22d3ee');
+                    toast.info(`Deep studying entire website: ${hostname}...`);
+                    try {
+                      const { auth } = await import('../firebase');
+                      if (auth.currentUser) {
+                        // Deep study can take a long time — no timeout
+                        try {
+                          console.log('[deepStudyWebsite] Fetching /api/memory/deep-study-stream...');
+                          const res = await fetch('/api/memory/deep-study-stream', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ url, userId: auth.currentUser.uid, model: memoryModelRef.current }),
+                          });
+
+                          if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+                          const reader = res.body.getReader();
+                          const decoder = new TextDecoder();
+                          let pagesStudied = 0;
+                          let totalPages = 0;
+
+                          try {
+                            while (true) {
+                              const { done, value } = await reader.read();
+                              if (done) break;
+                              const text = decoder.decode(value, { stream: true });
+                              const lines = text.split('\n').filter(l => l.startsWith('data: '));
+                              for (const line of lines) {
+                                try {
+                                  const progress = JSON.parse(line.slice(6));
+
+                                  // Extract page counts from meta
+                                  if (progress.meta?.totalPages) totalPages = progress.meta.totalPages;
+                                  if (progress.meta?.pagesStudied) pagesStudied = progress.meta.pagesStudied;
+
+                                  // Update pipeline bar with detailed progress
+                                  setPipelineActivity((prev: PipelineActivity) => ({
+                                    ...prev,
+                                    action: 'web-learning',
+                                    memory: progress.stage === 'complete' ? 'complete' : 'storing',
+                                    memoryProgress: progress.progress,
+                                    memoryLabel: progress.stage === 'complete'
+                                      ? `✓ ${pagesStudied} pages!`
+                                      : totalPages > 0
+                                        ? `Page ${pagesStudied} of ${totalPages}`
+                                        : progress.message,
+                                    actionLabel: progress.message,
+                                  }));
+
+                                  if (progress.stage === 'error') {
+                                    throw new Error(progress.message);
+                                  }
+                                } catch (parseErr: any) {
+                                  // skip malformed SSE
+                                }
+                              }
+                            }
+                          } finally {
+                            reader.releaseLock();
+                          }
+
+                          toast.success(`Deep study complete! Learned ${pagesStudied} pages from ${hostname}`);
+                          clearPipelineAction(`✓ ${pagesStudied} pages learned!`);
+
+                          // Push to local memory cache
+                          memoryService.localCache.unshift({
+                            id: crypto.randomUUID(),
+                            timestamp: Date.now(),
+                            summary: `Deep study of [${url}]: Crawled and memorized ${pagesStudied} pages from ${hostname}`,
+                            type: 'conversation'
+                          });
+
+                          response = { status: 'success', message: `Deep study complete! Studied ${pagesStudied} pages from ${hostname}` };
+                        } catch (streamErr: any) {
+                          console.error('[deepStudyWebsite] Stream error:', streamErr.message);
+                          throw streamErr;
+                        }
+                      } else {
+                        clearPipelineAction();
+                        response = { status: 'error', message: 'User not authenticated' };
+                      }
+                    } catch (e: any) {
+                      clearPipelineAction();
+                      console.error('[deepStudyWebsite] Error:', e.message);
+                      response = { status: 'error', message: `Deep study failed: ${e.message}` };
+                    }
                   } else if (call.name === 'analyzeSentiment') {
                     const { asset } = call.args as any;
+                    setPipelineAction('sentiment', `Sentiment: ${asset}...`, '#a855f7');
                     toast.info(`Consulting News Sentiment Analyst for ${asset}...`);
-                    const sentiments = ['Bullish', 'Bearish', 'Neutral'];
-                    const randomSentiment = sentiments[Math.floor(Math.random() * sentiments.length)];
-                    response = { status: 'success', sentiment: randomSentiment, message: `The News Sentiment Analyst reports that the current sentiment for ${asset} is ${randomSentiment}.` };
+                    try {
+                      const res = await fetch('/api/data/sentiment');
+                      const data = await res.json();
+                      const relevantArticles = (data.data || []).filter((a: any) =>
+                        a.title.toLowerCase().includes(asset.toLowerCase()) ||
+                        a.summary.toLowerCase().includes(asset.toLowerCase())
+                      );
+                      const sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
+                      relevantArticles.forEach((a: any) => {
+                        if (a.sentiment === 'Positive') sentimentCounts.positive++;
+                        else if (a.sentiment === 'Negative') sentimentCounts.negative++;
+                        else sentimentCounts.neutral++;
+                      });
+                      const overallSentiment = sentimentCounts.positive > sentimentCounts.negative ? 'Bullish' : sentimentCounts.negative > sentimentCounts.positive ? 'Bearish' : 'Neutral';
+                      clearPipelineAction(`✓ ${overallSentiment}`);
+                      response = {
+                        status: 'success',
+                        sentiment: overallSentiment,
+                        articleCount: relevantArticles.length,
+                        breakdown: sentimentCounts,
+                        topArticles: relevantArticles.slice(0, 3).map((a: any) => ({ title: a.title, sentiment: a.sentiment, source: a.source })),
+                        message: `The News Sentiment Analyst reports that the current sentiment for ${asset} is ${overallSentiment} based on ${relevantArticles.length} articles.`
+                      };
+                    } catch (e) {
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to fetch sentiment data for ${asset}` };
+                    }
                   } else if (call.name === 'getWhaleActivity') {
                     const { asset } = call.args as any;
+                    setPipelineAction('whale-tracking', `Tracking ${asset}...`, '#3b82f6');
                     toast.info(`Consulting Whale Tracker for ${asset}...`);
-                    const activities = ['Large accumulation detected', 'Massive sell-off spotted', 'No unusual activity'];
-                    const randomActivity = activities[Math.floor(Math.random() * activities.length)];
-                    response = { status: 'success', activity: randomActivity, message: `The Whale Tracker reports: ${randomActivity} for ${asset}.` };
+                    try {
+                      const res = await fetch('/api/data/whales');
+                      const data = await res.json();
+                      const relevantAlerts = (data.data || []).filter((w: any) =>
+                        w.symbol.toLowerCase().includes(asset.toLowerCase())
+                      );
+                      const totalVolume = relevantAlerts.reduce((sum: number, w: any) => sum + w.valueUsd, 0);
+                      clearPipelineAction(`✓ ${relevantAlerts.length} alerts`);
+                      response = {
+                        status: 'success',
+                        alertCount: relevantAlerts.length,
+                        totalVolumeUsd: totalVolume,
+                        alerts: relevantAlerts.slice(0, 5).map((w: any) => ({
+                          action: w.action,
+                          amount: w.amount,
+                          symbol: w.symbol,
+                          valueUsd: w.valueUsd,
+                          from: w.from,
+                          to: w.to,
+                          urgency: w.urgency
+                        })),
+                        message: `The Whale Tracker found ${relevantAlerts.length} recent whale movements for ${asset} totaling $${totalVolume.toLocaleString()}.`
+                      };
+                    } catch (e) {
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to fetch whale data for ${asset}` };
+                    }
                   }
 
+                  console.log('[TOOL CALL] Sending tool response for', call.name, 'response=', JSON.stringify(response).substring(0, 200));
                   sessionPromise.then(session => {
+                    console.log('[TOOL CALL] sendToolResponse executing for', call.name);
                     session.sendToolResponse({
                       functionResponses: [{
                         name: call.name,
@@ -659,6 +1369,7 @@ Available element IDs:
                         response: response
                       }]
                     });
+                    console.log('[TOOL CALL] sendToolResponse DONE for', call.name);
                   });
                 }
               }
@@ -667,12 +1378,17 @@ Available element IDs:
             if (message.serverContent?.inputTranscription) {
               const text = message.serverContent.inputTranscription.text;
               const finished = message.serverContent.inputTranscription.finished;
+              lastInputSourceRef.current = 'voice';
               if (text) {
-                const prefix = lastSpeakerRef.current !== 'user' ? '\n\nYou: ' : '';
-                setTranscript((prev) => prev + (prev && prefix ? prefix : (prefix ? 'You: ' : '')) + text);
+                const icon = '🎤';
+                const prefix = lastSpeakerRef.current !== 'user' ? `\n\n${icon} You: ` : '';
+                setTranscript((prev) => prev + (prev && prefix ? prefix : (prefix ? `${icon} You: ` : '')) + text);
                 lastSpeakerRef.current = 'user';
               }
               if (finished) {
+                // Save the complete user voice message to session
+                // We need to capture the accumulated text - use the transcript state
+                saveMessageToSession('user', text || '', 'voice');
                 lastSpeakerRef.current = null;
               }
             }
@@ -681,11 +1397,17 @@ Available element IDs:
               const text = message.serverContent.outputTranscription.text;
               const finished = message.serverContent.outputTranscription.finished;
               if (text) {
-                const prefix = lastSpeakerRef.current !== 'jarvis' ? '\n\nJarvis: ' : '';
-                setTranscript((prev) => prev + (prev && prefix ? prefix : (prefix ? 'Jarvis: ' : '')) + text);
+                const prefix = lastSpeakerRef.current !== 'jarvis' ? '\n\n🤖 Jarvis: ' : '';
+                setTranscript((prev) => prev + (prev && prefix ? prefix : (prefix ? '🤖 Jarvis: ' : '')) + text);
                 lastSpeakerRef.current = 'jarvis';
+                jarvisTextAccumulatorRef.current += text;
               }
               if (finished) {
+                // Save the complete accumulated Jarvis voice response to session
+                if (jarvisTextAccumulatorRef.current.trim()) {
+                  saveMessageToSession('jarvis', jarvisTextAccumulatorRef.current.trim(), 'voice');
+                  jarvisTextAccumulatorRef.current = '';
+                }
                 lastSpeakerRef.current = null;
               }
             }
@@ -705,9 +1427,16 @@ Available element IDs:
         },
       });
 
+      // Catch the initial connect promise here too so it doesn't leak unhandled rejections
+      sessionPromise.catch((error) => {
+        console.error('ai.live.connect promise rejected:', error);
+        setIsConnecting(false);
+        stopSession();
+      });
+
       sessionRef.current = sessionPromise;
     } catch (error) {
-      console.error('Failed to start session:', error);
+      console.error('Failed to start session synchronously:', error);
       setIsConnecting(false);
       stopSession();
     }
@@ -715,7 +1444,7 @@ Available element IDs:
 
   const stopSession = useCallback(() => {
     if (sessionRef.current) {
-      sessionRef.current.then((session: any) => session.close());
+      sessionRef.current.then((session: any) => session.close()).catch(() => {});
       sessionRef.current = null;
     }
     if (recorderRef.current) {
@@ -737,35 +1466,158 @@ Available element IDs:
 
     setIsConnected(false);
     setIsConnecting(false);
+    setIsSessionReady(false);
     setIsListening(false);
     setIsMicActive(false);
     setIsSpeaking(false);
     setVolume(0);
+    // NOTE: We intentionally do NOT clear transcript, sessionId, or chatMessages here.
+    // The session persists until endSession() is called.
   }, []);
 
-  const sendTextMessage = useCallback((text: string) => {
-    if (!isConnected || !sessionRef.current) return;
-    
-    const prefix = lastSpeakerRef.current !== 'user' ? '\n\nUser: ' : '\n';
-    setTranscript((prev) => prev + (prev && prefix ? prefix : (prefix ? 'User: ' : '')) + text);
-    lastSpeakerRef.current = 'user';
+  // Full session termination — clears everything
+  const endSession = useCallback(() => {
+    stopSession();
+    setTranscript('');
+    setChatMessages([]);
+    setCurrentSessionId(null);
+    currentSessionIdRef.current = null;
+    jarvisTextAccumulatorRef.current = '';
+    lastSpeakerRef.current = null;
+  }, [stopSession]);
 
+  const sendTextMessage = useCallback((text: string, memoryModel?: string) => {
+    if (!isSessionReady || !sessionRef.current) return;
+
+    lastInputSourceRef.current = 'text';
+    const icon = '⌨️';
+    const prefix = lastSpeakerRef.current !== 'user' ? `\n\n${icon} You: ` : '\n';
+    setTranscript((prev) => prev + (prev && prefix ? prefix : (prefix ? `${icon} You: ` : '')) + text);
+    lastSpeakerRef.current = 'user';
+    saveMessageToSession('user', text, 'text');
+
+    // Client-side detection: if user says memorize/study/learn + URL, handle directly
+    const studyMatch = text.match(/(?:memorize|study|learn\s*from|read\s*and\s*save|remember)\s+(https?:\/\/\S+)/i);
+    if (studyMatch) {
+      const url = studyMatch[1].replace(/[.,!?;]+$/, ''); // Strip trailing punctuation
+      console.log('[CLIENT] Detected study intent, URL:', url);
+      const hostname = (() => { try { return new URL(url).hostname; } catch { return url; } })();
+      setPipelineAction('web-learning', `Scraping ${hostname}...`, '#22d3ee');
+      toast.info(`Studying ${url}...`);
+
+      // Execute the study flow directly
+      (async () => {
+        try {
+          const { auth } = await import('../firebase');
+          if (!auth.currentUser) {
+            clearPipelineAction();
+            toast.error('Not authenticated');
+            return;
+          }
+
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+          const res = await fetch('/api/memory/study-stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, userId: auth.currentUser.uid, model: memoryModel }),
+            signal: controller.signal,
+          });
+
+          console.log('[CLIENT study] fetch status=', res.status);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (!res.body) throw new Error('No response body');
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let summary = '';
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const chunk = decoder.decode(value, { stream: true });
+              console.log('[CLIENT study] chunk:', chunk.substring(0, 200));
+              const lines = chunk.split('\n').filter(l => l.startsWith('data: '));
+              for (const line of lines) {
+                try {
+                  const progress = JSON.parse(line.replace('data: ', ''));
+                  if (progress.stage === 'error') {
+                    throw new Error(progress.message || 'Study failed');
+                  }
+                  setPipelineActivity(prev => ({
+                    ...prev,
+                    action: 'web-learning',
+                    memory: progress.stage === 'complete' ? 'complete' : 'storing',
+                    memoryProgress: progress.progress,
+                    memoryLabel: progress.stage === 'complete' ? '✓ Learned!' : `Learning ${progress.progress}%`,
+                    actionLabel: progress.message,
+                  }));
+                  if (progress.summary) summary = progress.summary;
+                } catch (e: any) {
+                  if (e.message.includes('Study failed')) throw e;
+                }
+              }
+            }
+          } finally {
+            reader.releaseLock();
+          }
+
+          clearTimeout(timeoutId);
+          toast.success(`Learned from ${url}!`);
+          clearPipelineAction('✓ Learned!');
+
+          // Tell Jarvis about what was learned
+          sessionRef.current?.then((session: any) => {
+            session.sendClientContent({
+              turns: [{ role: 'user', parts: [{ text: `[SYSTEM: I just studied ${url}. Here's a summary of what I learned: ${summary || 'Content was saved to memory.'}. Please acknowledge to the user that you've memorized this page.]` }] }],
+              turnComplete: true
+            });
+          });
+        } catch (e: any) {
+          clearPipelineAction();
+          console.error('[CLIENT study] Error:', e.message);
+          toast.error(`Failed to study: ${e.message}`);
+          // Still tell Jarvis
+          sessionRef.current?.then((session: any) => {
+            session.sendClientContent({
+              turns: [{ role: 'user', parts: [{ text: `[SYSTEM: I tried to study ${url} but it failed with error: ${e.message}. Please inform the user.]` }] }],
+              turnComplete: true
+            });
+          });
+        }
+      })();
+      return; // Don't send the original text to Gemini
+    }
+
+    // Normal text message — send via sendClientContent
     sessionRef.current.then((session: any) => {
-      session.sendClientContent({ turns: text, turnComplete: true });
-    });
-  }, [isConnected]);
+      session.sendClientContent({ turns: [{ role: 'user', parts: [{ text: text }] }], turnComplete: true });
+    }).catch(() => {});
+  }, [isSessionReady]);
 
   return {
-    startSession,
-    stopSession,
-    sendTextMessage,
-    isConnected,
     isConnecting,
+    isConnected,
+    isSessionReady,
     isListening,
-    isMicActive,
     isSpeaking,
     transcript,
     volume,
+    pipelineActivity,
+    startSession,
+    stopSession,
+    endSession,
+    micActive: isMicActive,
+    isTexting: false,
+    setIsTexting: (() => {}) as any,
     toggleMic,
+    sendTextMessage,
+    sendSystemUpdate,
+    currentSessionId,
+    chatMessages,
+    loadSession,
+    tradingMode,
   };
 }
