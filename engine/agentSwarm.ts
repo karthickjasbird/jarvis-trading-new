@@ -42,6 +42,7 @@ export class AgentSwarm {
   private db: any;
   private marketState: any;
   private isRunning = false;
+  private currentUserId = ''; // Set during pipeline run for brainActivity tagging
   private strategyTracker?: StrategyTracker;
   private taEngine: TechnicalAnalysisEngine;
   private intelEngine: MarketIntelligenceEngine;
@@ -49,13 +50,13 @@ export class AgentSwarm {
   private correlationGuard: CorrelationGuard;
   private marketScanner: MarketScanner;
 
-  constructor(db: any, marketState: any, strategyTracker?: StrategyTracker) {
+  constructor(db: any, marketState: any, strategyTracker?: StrategyTracker, ownerId?: string) {
     this.db = db;
     this.marketState = marketState;
     this.strategyTracker = strategyTracker;
     this.taEngine = new TechnicalAnalysisEngine();
     this.intelEngine = new MarketIntelligenceEngine();
-    this.portfolioIntel = new PortfolioIntelligence(db);
+    this.portfolioIntel = new PortfolioIntelligence(db, ownerId);
     this.correlationGuard = new CorrelationGuard(db);
     this.marketScanner = new MarketScanner(db);
   }
@@ -73,7 +74,7 @@ export class AgentSwarm {
     };
 
     try {
-      await this.db.collection('brainActivity').add(entry);
+      await this.db.collection('brainActivity').add({ ...entry, userId: this.currentUserId || undefined });
     } catch (err) {
       console.error(`[SWARM] Failed to log activity:`, err);
     }
@@ -111,6 +112,7 @@ export class AgentSwarm {
     }
 
     this.isRunning = true;
+    this.currentUserId = userId; // Tag all brain activity during this run
     const targetLabel = targetSymbol ? ` (target: ${targetSymbol})` : '';
     await this.log('system', `🧠 Agent Swarm pipeline initiated${targetLabel}...`, 'info');
 

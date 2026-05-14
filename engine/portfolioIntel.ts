@@ -60,11 +60,13 @@ export interface PortfolioSnapshot {
 
 export class PortfolioIntelligence {
   private db: any;
+  private ownerId: string;
   private circuitBreakerActive = false;
   private circuitBreakerResetDate = '';
 
-  constructor(db: any) {
+  constructor(db: any, ownerId?: string) {
     this.db = db;
+    this.ownerId = ownerId || '';
   }
 
   /**
@@ -176,6 +178,7 @@ export class PortfolioIntelligence {
           agent: 'sentinel',
           message: `⛔ CIRCUIT BREAKER: Daily drawdown ${dailyPnl.toFixed(2)}% exceeded ${PORTFOLIO_LIMITS.MAX_DAILY_DRAWDOWN}%. ALL trading halted until tomorrow.`,
           type: 'veto',
+          userId: this.ownerId || undefined,
           timestamp: new Date().toISOString(),
         });
       } catch {}
@@ -241,9 +244,9 @@ export class PortfolioIntelligence {
 
   private async getOpenPositions(): Promise<any[]> {
     try {
-      const snapshot = await this.db.collection('trades')
-        .where('status', '==', 'open')
-        .get();
+      let query = this.db.collection('trades').where('status', '==', 'open');
+      if (this.ownerId) query = query.where('userId', '==', this.ownerId);
+      const snapshot = await query.get();
       return snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() }));
     } catch {
       return [];
@@ -259,10 +262,11 @@ export class PortfolioIntelligence {
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
 
-      const snapshot = await this.db.collection('trades')
+      let query = this.db.collection('trades')
         .where('status', '==', 'closed')
-        .where('closedAt', '>=', todayStart.toISOString())
-        .get();
+        .where('closedAt', '>=', todayStart.toISOString());
+      if (this.ownerId) query = query.where('userId', '==', this.ownerId);
+      const snapshot = await query.get();
 
       if (snapshot.empty) return 0;
 

@@ -65,15 +65,105 @@ const db = admin.firestore();
 // Use the named database from the config
 db.settings({ databaseId: "(default)", ignoreUndefinedProperties: true });
 
+// ─── OWNER USER ID ────────────────────────────────────────
+// When sharing Firebase across multiple localhost users, this scopes
+// all background engines (Sentry, Scanner, Monitor) to ONLY process
+// the local user's data — preventing cross-user trade interference.
+const OWNER_USER_ID = process.env.OWNER_USER_ID || '';
+if (OWNER_USER_ID) {
+  log(`Owner scoping ACTIVE: All engines scoped to user ${OWNER_USER_ID.slice(0, 8)}...`);
+} else {
+  // Try to auto-detect from saved file
+  try {
+    const savedId = fs.readFileSync(path.join(process.cwd(), '.owner_user_id'), 'utf-8').trim();
+    if (savedId) {
+      (global as any).__OWNER_USER_ID = savedId;
+      log(`Owner auto-detected from .owner_user_id: ${savedId.slice(0, 8)}...`);
+    }
+  } catch {
+    log('WARNING: OWNER_USER_ID not set in .env. Will auto-detect on first sign-in.');
+  }
+}
+
+// Mutable getter for auto-detection
+function getOwnerId(): string {
+  return OWNER_USER_ID || (global as any).__OWNER_USER_ID || '';
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
   app.use(express.json());
 
+  // ─── AUTO-DETECT OWNER MIDDLEWARE ───────────────────────
+  // When OWNER_USER_ID is not set, auto-capture the first userId from API calls
+  app.use((req, _res, next) => {
+    if (!OWNER_USER_ID && !(global as any).__OWNER_USER_ID) {
+      const userId = (req.query?.userId as string) || (req.body?.userId as string);
+      if (userId && userId !== 'autonomous-system' && userId.length > 10) {
+        (global as any).__OWNER_USER_ID = userId;
+        // Save to file so it persists across restarts
+        try {
+          fs.writeFileSync(path.join(process.cwd(), '.owner_user_id'), userId);
+          log(`✅ Auto-detected owner: ${userId.slice(0, 8)}... (saved to .owner_user_id)`);
+          log('   Tip: Add OWNER_USER_ID="' + userId + '" to your .env for explicit control.');
+        } catch {}
+      }
+    }
+    next();
+  });
+
   // API routes FIRST
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok", message: "Sentry Mode Backend is running" });
+  });
+
+  // ─── SETUP STATUS (Onboarding Wizard) ─────────────────
+  app.get("/api/setup-status", (req, res) => {
+    const ownerId = getOwnerId();
+    res.json({
+      geminiKey: !!process.env.GEMINI_API_KEY,
+      binanceKey: !!process.env.BINANCE_API_KEY,
+      binanceSecret: !!process.env.BINANCE_SECRET_KEY,
+      telegramBot: !!process.env.TELEGRAM_BOT_TOKEN,
+      groqKey: !!process.env.GROQ_API_KEY,
+      ownerUserId: !!ownerId,
+      ownerIdValue: ownerId ? `${ownerId.slice(0, 8)}...` : '',
+    });
+  });
+
+  // ─── VERSION & UPDATE CHECK ────────────────────────────
+  app.get("/api/version", async (req, res) => {
+    try {
+      const versionFile = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'version.json'), 'utf-8'));
+      
+      // Try to fetch latest version from GitHub (non-blocking, cached)
+      let remoteVersion = null;
+      let updateAvailable = false;
+      try {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 3000); // 3s timeout
+        const ghRes = await fetch(
+          'https://raw.githubusercontent.com/karthickjasbird/jarvis-trading-new/main/version.json',
+          { signal: controller.signal }
+        );
+        if (ghRes.ok) {
+          remoteVersion = await ghRes.json();
+          updateAvailable = remoteVersion.version !== versionFile.version;
+        }
+      } catch {
+        // GitHub unreachable or timeout — silently ignore
+      }
+
+      res.json({
+        current: versionFile,
+        remote: remoteVersion,
+        updateAvailable,
+      });
+    } catch {
+      res.json({ current: { version: 'unknown' }, remote: null, updateAvailable: false });
+    }
   });
 
   // --- JARVIS CONSCIOUS MIND ROUTES ---
@@ -198,12 +288,12 @@ async function startServer() {
   const tradeExecutor = new TradeExecutor(db, marketState);
   const memoryManager = new MemoryManager(db);
   const userSecrets = new UserSecretsManager(db);
-  const sentryEngine = new SentryEngine(db, tradeExecutor, marketState, memoryManager);
+  const sentryEngine = new SentryEngine(db, tradeExecutor, marketState, memoryManager, OWNER_USER_ID);
   const scraper = new MarketScraper(memoryManager);
   const webAgent = new WebAgent(memoryManager);
   const goalPlanner = new GoalPlanner(db);
   const strategyTracker = new StrategyTracker(db);
-  const agentSwarm = new AgentSwarm(db, marketState, strategyTracker);
+  const agentSwarm = new AgentSwarm(db, marketState, strategyTracker, OWNER_USER_ID);
   const marketScanner = new MarketScanner(db);
   const confidenceEngine = new ConfidenceEngine(db);
   const postMortemEngine = new PostMortemEngine(db, memoryManager);
@@ -223,7 +313,10 @@ async function startServer() {
   priceFeed.on('maintenance_warning', async ({ minutesRemaining }) => {
     try {
       // Check if there are open positions — warn users
-      const openSnap = await db.collection('trades').where('status', '==', 'open').get();
+      // Check if the OWNER has open positions — only warn them
+      let maintQuery = db.collection('trades').where('status', '==', 'open');
+      if (OWNER_USER_ID) maintQuery = maintQuery.where('userId', '==', OWNER_USER_ID);
+      const openSnap = await maintQuery.get();
       if (!openSnap.empty) {
         const userIds = new Set<string>();
         openSnap.docs.forEach((d: any) => userIds.add(d.data().userId));
@@ -257,7 +350,7 @@ async function startServer() {
   // Scanner → evaluates → triggers Swarm → Monitor watches positions
 
   const { PositionMonitor } = await import('./engine/positionMonitor.ts');
-  const positionMonitor = new PositionMonitor(db, strategyTracker, marketState, memoryManager);
+  const positionMonitor = new PositionMonitor(db, strategyTracker, marketState, memoryManager, OWNER_USER_ID);
   setInterval(() => positionMonitor.monitor(), 60 * 1000); // Check stale trades every 60s
 
   // Autonomous scan-and-trigger loop
@@ -307,6 +400,7 @@ async function startServer() {
           message: `🚀 AUTO-TRIGGER: ${qualifiedOpps.length} pair(s) hit threshold (score ≥ 75 + bullish TA + macro aligned). Activating Agent Swarm...`,
           type: 'signal',
           data: { triggers: qualifiedOpps.map((o: any) => ({ symbol: o.symbol, score: o.score, confluence: o.confluence, dailyTrend: o.dailyTrend })) },
+          userId: OWNER_USER_ID || undefined,
           timestamp: new Date().toISOString(),
         });
 
@@ -316,8 +410,9 @@ async function startServer() {
           await broadcastTelegram(db, formatAutoTrigger(qualifiedOpps.map((o: any) => ({ symbol: o.symbol, score: o.score }))));
         } catch {}
 
-        // Fire the Agent Swarm (practice mode by default for safety)
-        const result = await agentSwarm.runPipeline('autonomous-system', true);
+        // Fire the Agent Swarm (use OWNER_USER_ID so trades are attributed to the local user)
+        const swarmUserId = OWNER_USER_ID || 'autonomous-system';
+        const result = await agentSwarm.runPipeline(swarmUserId, true);
         console.log(`[AUTONOMOUS] Swarm result: ${result.reason}`);
       } else {
         console.log(`[AUTONOMOUS] No pairs qualified (need score ≥ 75 + bullish confluence + macro aligned). Waiting for next scan.`);
@@ -1612,7 +1707,9 @@ async function startServer() {
         maxDailyLoss: 1000, maxPositionSizePct: 10, autoLiquidateThreshold: 300, maxOpenPositions: 5
       };
 
-      const openSnapshot = await db.collection('trades').where('status', '==', 'open').get();
+      let openQuery = db.collection('trades').where('status', '==', 'open');
+      if (userId) openQuery = openQuery.where('userId', '==', userId);
+      const openSnapshot = await openQuery.get();
       const openCount = openSnapshot.size;
 
       // Get today's P&L

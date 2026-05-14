@@ -2,8 +2,77 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if request.auth != null;
+
+    // User private data (secrets, broker configs, profile)
+    match /users/{userId}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Trades — only the trade owner can read/write
+    match /trades/{tradeId} {
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+
+    // Portfolios — only owner
+    match /portfolios/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Chat sessions — only owner
+    match /chatSessions/{sessionId} {
+      allow read, write: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create: if request.auth != null;
+      match /messages/{msgId} {
+        allow read, write: if request.auth != null;
+      }
+    }
+
+    // Notification configs — only owner
+    match /notificationConfigs/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Risk settings — only owner
+    match /riskSettings/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Sentry configs — only owner
+    match /sentryConfigs/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Trading goals — only owner
+    match /tradingGoals/{docId} {
+      allow read, write: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create: if request.auth != null;
+    }
+
+    // Brain activity — read-only for authenticated users (server writes only)
+    match /brainActivity/{docId} {
+      allow read: if request.auth != null;
+    }
+
+    // Post mortems — read-only from client
+    match /postMortems/{docId} {
+      allow read: if request.auth != null;
+    }
+
+    // Strategy outcomes — read-only from client
+    match /strategyOutcomes/{docId} {
+      allow read: if request.auth != null;
+    }
+
+    // Vector memory — read-only from client
+    match /vectorMemory/{docId} {
+      allow read: if request.auth != null;
+    }
+
+    // Learning loop configs — only owner
+    match /learningLoopConfigs/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
     }
   }
 }

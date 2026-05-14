@@ -28,6 +28,8 @@ import { TimeMachineControls } from './components/TimeMachineControls';
 import { ReplayChart } from './components/ReplayChart';
 import { LiveJarvisChart } from './components/LiveJarvisChart';
 import { MaintenanceBanner } from './components/MaintenanceBanner';
+import { UpdateBanner } from './components/UpdateBanner';
+import { OnboardingWizard } from './components/OnboardingWizard';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -96,6 +98,7 @@ export default function App() {
   const [selectedChartSymbol, setSelectedChartSymbol] = useState('BINANCE:BTCUSDT');
   const [liveVisionEnabled, setLiveVisionEnabled] = useState(false);
   const [showRealModeConfirm, setShowRealModeConfirm] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
   // Safe toggle with confirmation when switching to REAL mode
   const togglePracticeMode = () => {
@@ -368,6 +371,7 @@ export default function App() {
     <div className={`h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center justify-center relative overflow-hidden font-sans transition-colors duration-500 ${isPracticeMode ? 'ring-2 ring-amber-500/30 ring-inset' : 'ring-2 ring-cyan-500/20 ring-inset'}`}>
       <Toaster theme="dark" position="top-center" />
       <MaintenanceBanner />
+      <UpdateBanner />
 
       {/* Chat History Sidebar */}
       <ChatSidebar
@@ -634,10 +638,8 @@ export default function App() {
                 <button
                   id="logout-button"
                   onClick={() => { 
-                    if (window.confirm('Are you sure you want to logout?')) {
-                      auth.signOut().then(() => setUser(null)); 
-                    }
-                    setRightMenuOpen(false); 
+                    setRightMenuOpen(false);
+                    setShowLogoutConfirm(true);
                   }}
                   className="flex items-center gap-3 px-4 py-3 rounded-xl text-red-400 hover:bg-red-500/10 transition-colors text-left"
                 >
@@ -1626,6 +1628,55 @@ export default function App() {
                   className="flex-1 px-4 py-3 rounded-xl bg-red-600/90 hover:bg-red-500 text-white font-bold transition-all border border-red-500/50 shadow-[0_0_20px_rgba(239,68,68,0.3)]"
                 >
                   I Understand — Go Live
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Onboarding Setup Wizard for new users */}
+      <OnboardingWizard userId={user?.uid || ''} />
+
+      {/* Logout Confirmation Modal */}
+      <AnimatePresence>
+        {showLogoutConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+            onClick={() => setShowLogoutConfirm(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl"
+            >
+              <div className="text-center mb-5">
+                <div className="w-14 h-14 mx-auto mb-3 rounded-full bg-red-500/15 flex items-center justify-center">
+                  <LogOut className="w-7 h-7 text-red-400" />
+                </div>
+                <h3 className="text-lg font-bold text-white mb-1">Sign Out?</h3>
+                <p className="text-zinc-400 text-sm">Are you sure you want to logout?</p>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowLogoutConfirm(false)}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-medium transition-all border border-zinc-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    setShowLogoutConfirm(false);
+                    auth.signOut().then(() => setUser(null));
+                  }}
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-red-600/90 hover:bg-red-500 text-white font-bold transition-all border border-red-500/50"
+                >
+                  Logout
                 </button>
               </div>
             </motion.div>

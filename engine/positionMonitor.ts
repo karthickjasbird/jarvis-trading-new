@@ -21,14 +21,16 @@ export class PositionMonitor {
   private taEngine: TechnicalAnalysisEngine;
   private strategyTracker: StrategyTracker;
   private memoryManager: MemoryManager | null;
+  private ownerId: string; // Scopes queries to this user only
   private isRunning = false;
 
-  constructor(db: any, strategyTracker: StrategyTracker, marketState?: Record<string, { price: number; lastChange: number }>, memoryManager?: MemoryManager) {
+  constructor(db: any, strategyTracker: StrategyTracker, marketState?: Record<string, { price: number; lastChange: number }>, memoryManager?: MemoryManager, ownerId?: string) {
     this.db = db;
     this.marketState = marketState || {};
     this.taEngine = new TechnicalAnalysisEngine();
     this.strategyTracker = strategyTracker;
     this.memoryManager = memoryManager || null;
+    this.ownerId = ownerId || '';
   }
 
   /**
@@ -39,10 +41,10 @@ export class PositionMonitor {
     this.isRunning = true;
 
     try {
-      // Fetch all open trades
-      const snapshot = await this.db.collection('trades')
-        .where('status', '==', 'open')
-        .get();
+      // Fetch open trades — scoped to owner only (prevents cross-user interference)
+      let query = this.db.collection('trades').where('status', '==', 'open');
+      if (this.ownerId) query = query.where('userId', '==', this.ownerId);
+      const snapshot = await query.get();
 
       if (snapshot.empty) {
         this.isRunning = false;
@@ -311,6 +313,7 @@ export class PositionMonitor {
         agent: 'monitor',
         message,
         type: 'execution',
+        userId: this.ownerId || undefined,
         timestamp: new Date().toISOString(),
       });
     } catch {}

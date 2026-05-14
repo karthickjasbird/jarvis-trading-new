@@ -285,6 +285,15 @@ export function BrokerSettings({
             <div>
               <h2 className="text-xl font-bold text-zinc-100">{user.displayName || 'Settings'}</h2>
               <p className="text-sm text-zinc-400">{user.email}</p>
+              <div className="flex items-center gap-2 mt-1">
+                <p className="text-[11px] text-zinc-500 font-mono">ID: {user.uid}</p>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(user.uid); toast.success('User ID copied! Paste it as OWNER_USER_ID in your .env file.'); }}
+                  className="text-[10px] px-1.5 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 rounded border border-zinc-700 transition-colors"
+                >
+                  Copy
+                </button>
+              </div>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-zinc-400">

@@ -14,6 +14,7 @@ export class SentryEngine {
   private tradeExecutor: TradeExecutor;
   private marketState: any;
   private memoryManager: MemoryManager;
+  private ownerId: string; // Scopes all queries to this user's data only
 
   // Per-user Circuit Breaker state
   private circuitBreakers: Map<string, {
@@ -30,11 +31,12 @@ export class SentryEngine {
   private processingTrades: Set<string> = new Set(); // Prevent double-processing
   private cachedAutoLiquidateThreshold: number = 0; // From risk settings — 0 means disabled
 
-  constructor(db: any, tradeExecutor: TradeExecutor, marketState: any, memoryManager: MemoryManager) {
+  constructor(db: any, tradeExecutor: TradeExecutor, marketState: any, memoryManager: MemoryManager, ownerId?: string) {
     this.db = db;
     this.tradeExecutor = tradeExecutor;
     this.marketState = marketState;
     this.memoryManager = memoryManager;
+    this.ownerId = ownerId || '';
   }
 
   private getCircuitBreaker(userId: string) {
@@ -131,7 +133,10 @@ export class SentryEngine {
     const now = Date.now();
     if (now - this.lastCacheRefresh > this.cacheRefreshInterval) {
       try {
-        const snapshot = await this.db.collection('trades').where('status', '==', 'open').get();
+        // Scope to owner's trades only (prevents cross-user interference in shared Firebase)
+        let query = this.db.collection('trades').where('status', '==', 'open');
+        if (this.ownerId) query = query.where('userId', '==', this.ownerId);
+        const snapshot = await query.get();
         this.openTradesCache = snapshot.docs.map((doc: any) => ({
           id: doc.id,
           ref: doc.ref,
@@ -141,10 +146,9 @@ export class SentryEngine {
 
         // Also refresh auto-liquidate threshold from risk settings
         try {
-          // Try to find a userId from the cached trades
-          const sampleUserId = this.openTradesCache[0]?.userId;
-          if (sampleUserId) {
-            const riskDoc = await this.db.collection('riskSettings').doc(sampleUserId).get();
+          const riskUserId = this.ownerId || this.openTradesCache[0]?.userId;
+          if (riskUserId) {
+            const riskDoc = await this.db.collection('riskSettings').doc(riskUserId).get();
             this.cachedAutoLiquidateThreshold = riskDoc.exists
               ? (riskDoc.data()?.autoLiquidateThreshold || 0)
               : 300; // default $300
@@ -353,30 +357,30 @@ export class SentryEngine {
       }
 
       // 2. DAILY P&L KILL SWITCH — Nuclear safety net
-      // Aggregate total daily P&L (realized + unrealized) across ALL users
-      // If exceeded, panic close everything and shut down
-      if (!this.dailyShutdown) {
+      // Aggregate daily P&L (realized + unrealized) for the OWNER only
+      // If exceeded, panic close and shut down
+      const killSwitchUserId = this.ownerId;
+      if (killSwitchUserId && !this.isCircuitBreakerActive(killSwitchUserId)) {
         try {
           const today = new Date();
           today.setHours(0, 0, 0, 0);
           
-          // Get all trades closed today
-          const closedToday = await this.db.collection('trades')
+          // Get owner's trades closed today
+          let closedQuery = this.db.collection('trades')
             .where('status', '==', 'closed')
-            .where('closedAt', '>=', today.toISOString())
-            .get();
+            .where('closedAt', '>=', today.toISOString());
+          if (killSwitchUserId) closedQuery = closedQuery.where('userId', '==', killSwitchUserId);
+          const closedToday = await closedQuery.get();
 
           let totalRealizedPnl = 0;
-          const userIds = new Set<string>();
           closedToday.docs.forEach((d: any) => {
             totalRealizedPnl += d.data().pnl || 0;
-            userIds.add(d.data().userId);
           });
 
-          // Get unrealized P&L from open positions
-          const openPositions = await this.db.collection('trades')
-            .where('status', '==', 'open')
-            .get();
+          // Get unrealized P&L from owner's open positions
+          let openQuery = this.db.collection('trades').where('status', '==', 'open');
+          if (killSwitchUserId) openQuery = openQuery.where('userId', '==', killSwitchUserId);
+          const openPositions = await openQuery.get();
 
           let totalUnrealizedPnl = 0;
           for (const d of openPositions.docs) {
@@ -386,7 +390,6 @@ export class SentryEngine {
               const isLong = trade.side === 'buy';
               const priceDiff = currentPrice - trade.entryPrice;
               totalUnrealizedPnl += isLong ? (priceDiff * trade.quantity) : (-priceDiff * trade.quantity);
-              userIds.add(trade.userId);
             }
           }
 
@@ -396,21 +399,20 @@ export class SentryEngine {
           if (totalDailyPnl <= MAX_DAILY_LOSS) {
             console.log(`[KILL SWITCH] 🛑 DAILY LOSS LIMIT BREACHED: $${totalDailyPnl.toFixed(2)} (limit: $${MAX_DAILY_LOSS})`);
             
-            // Panic close ALL open positions for ALL users
-            for (const userId of userIds) {
-              try {
-                await this.tradeExecutor.panicCloseAll(userId);
-              } catch (e: any) {
-                console.error(`[KILL SWITCH] Failed to panic close for ${userId}:`, e.message);
-              }
-              await sendTelegramNotification(this.db, userId,
-                `🛑 <b>DAILY LOSS LIMIT REACHED</b>\n\nTotal daily P&L: $${totalDailyPnl.toFixed(2)} (limit: $${MAX_DAILY_LOSS})\n\nAll positions have been PANIC CLOSED.\nAll autonomous trading is PAUSED until tomorrow.\n\nThis is a safety mechanism to protect your capital.`
-              );
+            // Panic close owner's open positions only
+            try {
+              await this.tradeExecutor.panicCloseAll(killSwitchUserId);
+            } catch (e: any) {
+              console.error(`[KILL SWITCH] Failed to panic close for ${killSwitchUserId}:`, e.message);
             }
+            await sendTelegramNotification(this.db, killSwitchUserId,
+              `🛑 <b>DAILY LOSS LIMIT REACHED</b>\n\nTotal daily P&L: $${totalDailyPnl.toFixed(2)} (limit: $${MAX_DAILY_LOSS})\n\nAll positions have been PANIC CLOSED.\nAll autonomous trading is PAUSED until tomorrow.\n\nThis is a safety mechanism to protect your capital.`
+            );
 
-            // Activate daily shutdown
-            this.dailyShutdown = true;
-            console.log('[KILL SWITCH] 🛑 Daily shutdown activated. No more trading today.');
+            // Activate daily shutdown for this user
+            const cb = this.getCircuitBreaker(killSwitchUserId);
+            cb.dailyShutdown = true;
+            console.log(`[KILL SWITCH] 🛑 Daily shutdown activated for ${killSwitchUserId.slice(0, 8)}.`);
           }
         } catch (killErr: any) {
           // Kill switch errors should never crash the monitor
@@ -419,7 +421,9 @@ export class SentryEngine {
       }
 
       // 3. Monitor Individual Positions (SL, TP, Trailing Stop) - same as before
-      const openPositionsSnapshot = await this.db.collection('trades').where('status', '==', 'open').get();
+      let monitorQuery = this.db.collection('trades').where('status', '==', 'open');
+      if (this.ownerId) monitorQuery = monitorQuery.where('userId', '==', this.ownerId);
+      const openPositionsSnapshot = await monitorQuery.get();
       
       for (const doc of openPositionsSnapshot.docs) {
         const trade = doc.data();

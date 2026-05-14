@@ -239,6 +239,7 @@ Be specific. Reference the actual numbers.`;
         message: `${emoji} ${gradeEmoji} POST-MORTEM: ${report.symbol} — Grade ${report.grade} | ${report.analysis.slice(0, 100)}`,
         type: 'analysis',
         data: { grade: report.grade, lessons: report.lessons },
+        userId: report.userId || undefined,
         timestamp: new Date().toISOString(),
       });
     } catch {}
