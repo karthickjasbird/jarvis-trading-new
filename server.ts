@@ -22,6 +22,7 @@ import { BinancePriceFeed } from "./engine/binancePriceFeed.ts";
 import { UserSecretsManager } from "./engine/userSecrets.ts";
 import { RSI, MACD, EMA } from "technicalindicators";
 import { generateText } from "./engine/modelRouter.ts";
+import { generateAppManifest, formatManifestForPrompt } from "./engine/manifestGenerator.ts";
 
 // Simple file logger
 const logFile = fs.createWriteStream("startup.log", { flags: "a" });
@@ -166,6 +167,15 @@ async function startServer() {
     }
   });
 
+  // ─── APP MANIFEST (Self-Awareness) ────────────────────
+  const appManifest = generateAppManifest(process.cwd());
+  log(`App Manifest generated: v${appManifest.version}, ${appManifest.engines.length} engines, ${appManifest.apiRouteCount} API routes`);
+  const manifestPromptText = formatManifestForPrompt(appManifest);
+
+  app.get("/api/system-manifest", (_req, res) => {
+    res.json(appManifest);
+  });
+
   // --- JARVIS CONSCIOUS MIND ROUTES ---
   app.get("/api/jarvis-mind", (req, res) => {
     try {
@@ -177,7 +187,7 @@ async function startServer() {
       const lesson = fs.existsSync(lessonPath) ? fs.readFileSync(lessonPath, 'utf-8') : '';
       const memory = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, 'utf-8') : '';
       
-      res.json({ status: "success", mind: { soul, lesson, memory } });
+      res.json({ status: "success", mind: { soul, lesson, memory, manifest: manifestPromptText } });
     } catch (e: any) {
       console.error("Error reading Jarvis mind files:", e);
       res.status(500).json({ error: e.message });

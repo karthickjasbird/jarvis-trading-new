@@ -300,6 +300,21 @@ const createTradingGoalTool: FunctionDeclaration = {
   }
 };
 
+const inspectSystemTool: FunctionDeclaration = {
+  name: 'inspectSystem',
+  description: 'Inspect the current state of the Jarvis application. Returns live details about engines, API routes, system health, version info, and recent code changes. Use when the user asks about your capabilities, features, system health, or recent updates.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      aspect: { 
+        type: Type.STRING, 
+        description: 'What to inspect: "all" for full manifest, "engines" for engine list, "version" for version info, "health" for system status, "changelog" for recent changes.'
+      }
+    },
+    required: ['aspect']
+  }
+};
+
 export function useJarvisLive(
   executeTradeFn?: (params: any) => Promise<any>,
   closePositionFn?: (tradeId: string) => Promise<any>,
@@ -536,7 +551,8 @@ export function useJarvisLive(
       try {
         const soulRes = await fetch('/api/jarvis-mind');
         const soulData = await soulRes.json();
-        if (soulData.mind?.soul) soulContent = soulData.mind.soul;
+      if (soulData.mind?.soul) soulContent = soulData.mind.soul;
+        if (soulData.mind?.manifest) soulContent += '\n\n' + soulData.mind.manifest;
       } catch { }
 
       // Fetch Morning Briefing data (alerts, P&L, loss debriefs)
@@ -651,7 +667,7 @@ ${morningBriefing}`;
             },
           },
           tools: [
-            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, switchTradingModeTool, getMarketPriceTool, executeTradeTool, closePositionTool, panicCloseAllTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool, studyWebsiteTool, deepStudyWebsiteTool, createTradingGoalTool] }
+            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, switchTradingModeTool, getMarketPriceTool, executeTradeTool, closePositionTool, panicCloseAllTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool, studyWebsiteTool, deepStudyWebsiteTool, createTradingGoalTool, inspectSystemTool] }
           ],
           systemInstruction: systemInstruction,
           inputAudioTranscription: {},
@@ -1356,6 +1372,29 @@ ${morningBriefing}`;
                     } catch (e) {
                       clearPipelineAction();
                       response = { status: 'error', message: `Failed to fetch whale data for ${asset}` };
+                    }
+                  } else if (call.name === 'inspectSystem') {
+                    const { aspect } = call.args as any;
+                    setPipelineAction('system-inspect', 'Inspecting system...', '#06b6d4');
+                    try {
+                      const res = await fetch('/api/system-manifest');
+                      const manifest = await res.json();
+                      clearPipelineAction('✓ System inspected');
+                      
+                      if (aspect === 'engines') {
+                        response = { status: 'success', engines: manifest.engines, message: `${manifest.engines.length} engines active.` };
+                      } else if (aspect === 'version') {
+                        response = { status: 'success', version: manifest.version, buildDate: manifest.buildDate, changelog: manifest.changelog };
+                      } else if (aspect === 'changelog') {
+                        response = { status: 'success', recentChanges: manifest.recentChanges, changelog: manifest.changelog };
+                      } else if (aspect === 'health') {
+                        response = { status: 'success', version: manifest.version, engineCount: manifest.engines.length, apiRouteCount: manifest.apiRouteCount, generatedAt: manifest.generatedAt, message: 'All systems operational.' };
+                      } else {
+                        response = { status: 'success', ...manifest };
+                      }
+                    } catch (e: any) {
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to inspect system: ${e.message}` };
                     }
                   }
 
