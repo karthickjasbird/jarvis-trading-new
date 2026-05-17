@@ -83,9 +83,20 @@ export class MarketScanner {
   }
 
   /**
-   * Calculate opportunity score (0-100)
+   * Calculate opportunity score (0-100) — TA-DRIVEN
+   * 
+   * The TA signal is the PRIMARY driver of the score.
+   * A bearish coin can NEVER score above 50, no matter how much volume it has.
+   * Only bullish coins with confirmed TA signals can reach 75+.
+   * 
+   * Score breakdown:
+   *   Base: 50
+   *   TA Signal: -40 to +40 (PRIMARY)
+   *   Momentum alignment: -10 to +10
+   *   Volume bonus: 0 to +10
+   *   Volatility: -5 to +5
    */
-  private calculateScore(ticker: any): number {
+  private calculateScoreWithTA(ticker: any, taBias: string, taConfidence: number): number {
     const change = parseFloat(ticker.priceChangePercent);
     const volume = parseFloat(ticker.quoteVolume);
     const high = parseFloat(ticker.highPrice);
@@ -94,28 +105,59 @@ export class MarketScanner {
 
     let score = 50; // baseline
 
-    // Momentum strength (up to ±20 points)
-    score += Math.min(20, Math.abs(change) * 3);
+    // ── TA Signal (PRIMARY — up to ±40 points) ──
+    const taScore: Record<string, number> = {
+      'strong_buy': 40,
+      'buy': 20,
+      'neutral': 0,
+      'sell': -20,
+      'strong_sell': -40,
+    };
+    score += taScore[taBias] ?? 0;
 
-    // Volume factor (high volume = more opportunity)
-    if (volume > 500_000_000) score += 15;
-    else if (volume > 100_000_000) score += 10;
-    else if (volume > 50_000_000) score += 5;
+    // ── Momentum alignment with TA (up to ±10 points) ──
+    const isBullishTA = taBias === 'buy' || taBias === 'strong_buy';
+    const isBearishTA = taBias === 'sell' || taBias === 'strong_sell';
+    
+    if (isBullishTA && change > 0) {
+      // Momentum confirms bullish TA — bonus
+      score += Math.min(10, change * 2);
+    } else if (isBullishTA && change < -2) {
+      // Momentum contradicts bullish TA — penalty
+      score -= 5;
+    } else if (isBearishTA && change < 0) {
+      // Momentum confirms bearish TA — extra penalty
+      score -= Math.min(10, Math.abs(change) * 2);
+    } else if (change < -3) {
+      // Heavy dump regardless of TA — penalty
+      score -= 5;
+    }
 
-    // Volatility factor (moderate volatility is good)
+    // ── Volume bonus (up to +10, but ONLY for bullish/neutral) ──
+    if (!isBearishTA) {
+      if (volume > 500_000_000) score += 10;
+      else if (volume > 100_000_000) score += 7;
+      else if (volume > 50_000_000) score += 3;
+    }
+
+    // ── Volatility (moderate is good, extreme is bad) ──
     const volatility = ((high - low) / price) * 100;
-    if (volatility > 2 && volatility < 8) score += 10;
-    else if (volatility >= 8) score += 5; // too volatile, slight bonus
+    if (volatility > 2 && volatility < 6) score += 5;  // Sweet spot
+    else if (volatility >= 10) score -= 5;               // Too wild
 
-    // Cap at 100
-    return Math.min(100, Math.round(score));
+    // ── Hard caps based on TA direction ──
+    if (isBearishTA) score = Math.min(score, 45);   // Bearish NEVER above 45
+    if (taBias === 'strong_sell') score = Math.min(score, 25); // Strong sell capped at 25
+
+    // Final clamp
+    return Math.max(0, Math.min(100, Math.round(score)));
   }
 
   /**
-   * Run a full market scan
+   * Run a full market scan — TA-enriched for ALL coins
    */
   async scan(): Promise<ScanSummary> {
-    console.log('[SCANNER] 🔍 Scanning 20 crypto pairs...');
+    console.log('[SCANNER] 🔍 Scanning 20 crypto pairs with full TA...');
 
     const tickers = await this.fetchTickers();
 
@@ -135,6 +177,7 @@ export class MarketScanner {
       return empty;
     }
 
+    // Step 1: Build basic results from ticker data
     const results: ScanResult[] = tickers.map((t: any) => {
       const price = parseFloat(t.lastPrice);
       const change24h = parseFloat(t.priceChangePercent);
@@ -152,16 +195,65 @@ export class MarketScanner {
         low24h,
         momentum: this.getMomentum(change24h),
         volatility: parseFloat(volatility.toFixed(2)),
-        score: this.calculateScore(t),
+        score: 50, // Placeholder — will be recalculated after TA
       };
     });
 
-    // Sort by score descending
+    // Step 2: Run TA on ALL coins in parallel (batches of 5 to respect rate limits)
+    const BATCH_SIZE = 5;
+    for (let batch = 0; batch < results.length; batch += BATCH_SIZE) {
+      const batchResults = results.slice(batch, batch + BATCH_SIZE);
+      
+      await Promise.allSettled(batchResults.map(async (result) => {
+        try {
+          const cleanSymbol = result.symbol.replace('/USDT', 'USDT');
+          const candles = await this.taEngine.fetchCandles(cleanSymbol, '1h', 100);
+          const indicators = this.taEngine.computeIndicators(candles);
+          const taSignal = this.taEngine.generateSignal(indicators);
+
+          result.rsi = indicators.rsi !== null ? Math.round(indicators.rsi) : undefined;
+          result.confluence = taSignal.bias;
+          result.taSignal = taSignal.reasons.slice(0, 3).join('; ');
+
+          // Calculate TA-driven score
+          const ticker = tickers.find((t: any) => t.symbol === cleanSymbol);
+          result.score = this.calculateScoreWithTA(ticker, taSignal.bias, taSignal.confidence);
+        } catch (err: any) {
+          console.error(`[SCANNER] TA failed for ${result.symbol}:`, err.message);
+          // Fallback: use basic momentum-only score
+          result.score = result.change24h > 0 ? Math.min(65, 50 + result.change24h * 3) : Math.max(20, 50 + result.change24h * 3);
+          result.confluence = result.change24h > 1 ? 'buy' : result.change24h < -1 ? 'sell' : 'neutral';
+        }
+      }));
+    }
+    console.log(`[SCANNER] ✅ TA complete for ${results.length} coins (${Math.ceil(results.length / BATCH_SIZE)} batches)`);
+
+    // Step 2.5: POST-SCAN VALIDATION — Defense-in-depth
+    // Enforce hard score caps based on TA signal, catching any edge case or fallback path
+    for (const result of results) {
+      const isBearish = result.confluence === 'sell' || result.confluence === 'strong_sell';
+      const isBullish = result.confluence === 'buy' || result.confluence === 'strong_buy';
+      const isNeutral = !isBearish && !isBullish;
+
+      if (result.confluence === 'strong_sell') {
+        result.score = Math.min(result.score, 25);
+      } else if (result.confluence === 'sell') {
+        result.score = Math.min(result.score, 45);
+      } else if (isNeutral) {
+        result.score = Math.min(result.score, 65);
+      }
+      // BUY/STRONG_BUY can go up to 100 — no cap needed
+
+      // Also ensure score is never negative
+      result.score = Math.max(0, result.score);
+    }
+
+    // Step 3: Sort by score descending
     results.sort((a, b) => b.score - a.score);
 
-    const bullish = results.filter(r => r.momentum === 'bull' || r.momentum === 'strong_bull').length;
-    const bearish = results.filter(r => r.momentum === 'bear' || r.momentum === 'strong_bear').length;
-    const neutral = results.filter(r => r.momentum === 'neutral').length;
+    const bullish = results.filter(r => r.confluence === 'buy' || r.confluence === 'strong_buy').length;
+    const bearish = results.filter(r => r.confluence === 'sell' || r.confluence === 'strong_sell').length;
+    const neutral = results.filter(r => !r.confluence || r.confluence === 'neutral').length;
 
     // Determine market sentiment
     let marketSentiment = 'Mixed';
@@ -172,36 +264,20 @@ export class MarketScanner {
 
     const topOpportunities = results.slice(0, 5);
 
-    // Generate signal text for top 3 using AI + enrich with real TA data
+    // Step 4: Generate AI signal text for top 3 opportunities only
     for (const opp of topOpportunities.slice(0, 3)) {
       try {
-        // Fetch real 1H candle TA for this pair
-        const cleanSymbol = opp.symbol.replace('/USDT', 'USDT');
-        const candles = await this.taEngine.fetchCandles(cleanSymbol, '1h', 100);
-        const indicators = this.taEngine.computeIndicators(candles);
-        const taSignal = this.taEngine.generateSignal(indicators);
-
-        // Inject real TA data into the scan result
-        opp.rsi = indicators.rsi !== null ? Math.round(indicators.rsi) : undefined;
-        opp.confluence = taSignal.bias;
-        opp.taSignal = taSignal.reasons.slice(0, 2).join('; ');
-
-        // Boost score based on TA confluence
-        if (taSignal.bias === 'strong_buy') opp.score = Math.min(100, opp.score + 10);
-        else if (taSignal.bias === 'strong_sell') opp.score = Math.max(0, opp.score - 10);
-
         const prompt = `You are a crypto signal generator. Given this REAL data for ${opp.symbol}:
 - Price: $${opp.price}
 - 24h Change: ${opp.change24h > 0 ? '+' : ''}${opp.change24h.toFixed(2)}%
-- RSI(14): ${indicators.rsi?.toFixed(1) || 'N/A'}
-- MACD Histogram: ${indicators.macd?.histogram.toFixed(4) || 'N/A'}
-- EMA 9/21: ${indicators.ema9?.toFixed(2) || 'N/A'} / ${indicators.ema21?.toFixed(2) || 'N/A'}
-- TA Signal: ${taSignal.bias} (${taSignal.confidence}%)
+- RSI(14): ${opp.rsi || 'N/A'}
+- TA Signal: ${opp.confluence} 
+- Score: ${opp.score}/100
 
 Write a ONE-LINE trading signal (under 15 words) based on the REAL indicators. Be specific.`;
         opp.signal = await generateText('gemini-2.5-flash', prompt);
       } catch {
-        opp.signal = `${opp.momentum.includes('bull') ? '📈' : '📉'} ${opp.change24h > 0 ? '+' : ''}${opp.change24h.toFixed(1)}% — ${opp.momentum} momentum`;
+        opp.signal = `${opp.confluence === 'buy' || opp.confluence === 'strong_buy' ? '📈' : opp.confluence === 'sell' || opp.confluence === 'strong_sell' ? '📉' : '➡️'} ${opp.change24h > 0 ? '+' : ''}${opp.change24h.toFixed(1)}% — ${opp.confluence || opp.momentum}`;
       }
     }
 
@@ -222,7 +298,7 @@ Write a ONE-LINE trading signal (under 15 words) based on the REAL indicators. B
     try {
       await this.db.collection('scanHistory').add({
         ...summary,
-        allResults: results.map(r => ({ symbol: r.symbol, price: r.price, change24h: r.change24h, score: r.score, momentum: r.momentum })),
+        allResults: results.map(r => ({ symbol: r.symbol, price: r.price, change24h: r.change24h, score: r.score, momentum: r.momentum, confluence: r.confluence })),
       });
     } catch (err) {
       console.error('[SCANNER] Failed to save scan history:', err);

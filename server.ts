@@ -13,6 +13,9 @@ import { MemoryManager } from "./engine/memory.ts";
 import { MarketScraper } from "./engine/scraper.ts";
 import { WebAgent } from "./engine/webAgent.ts";
 import { GoalPlanner } from "./engine/goalPlanner.ts";
+import { GoalExecutor } from "./engine/goalExecutor.ts";
+import { RegimeDetector } from "./engine/regimeDetector.ts";
+import { KellyCalculator } from "./engine/kellyCalculator.ts";
 import { AgentSwarm } from "./engine/agentSwarm.ts";
 import { MarketScanner } from "./engine/marketScanner.ts";
 import { StrategyTracker } from "./engine/strategyTracker.ts";
@@ -305,6 +308,10 @@ async function startServer() {
   const strategyTracker = new StrategyTracker(db);
   const agentSwarm = new AgentSwarm(db, marketState, strategyTracker, OWNER_USER_ID);
   const marketScanner = new MarketScanner(db);
+  const goalExecutor = new GoalExecutor(db, tradeExecutor, marketScanner, marketState, OWNER_USER_ID);
+  const regimeDetector = new RegimeDetector();
+  const kellyCalculator = new KellyCalculator(db);
+  sentryEngine.setGoalExecutor(goalExecutor);
   const confidenceEngine = new ConfidenceEngine(db);
   const postMortemEngine = new PostMortemEngine(db, memoryManager);
 
@@ -362,6 +369,7 @@ async function startServer() {
   const { PositionMonitor } = await import('./engine/positionMonitor.ts');
   const positionMonitor = new PositionMonitor(db, strategyTracker, marketState, memoryManager, OWNER_USER_ID);
   setInterval(() => positionMonitor.monitor(), 60 * 1000); // Check stale trades every 60s
+  setInterval(() => goalExecutor.monitor(), 60 * 1000); // Check campaign progress every 60s
 
   // Autonomous scan-and-trigger loop
   let autonomousEnabled = true; // Toggle via /api/autonomous/toggle
@@ -1032,6 +1040,56 @@ async function startServer() {
     }
   });
 
+  // --- KELLY POSITION SIZING ROUTES ---
+
+  // Get full Kelly report for a user
+  app.get("/api/kelly/:userId", async (req, res) => {
+    try {
+      const report = await kellyCalculator.getKellyReport(req.params.userId);
+      res.json(report);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get optimal position size for a specific trade
+  app.post("/api/kelly/size", async (req, res) => {
+    const { userId, capital, symbol, confidence } = req.body;
+    if (!userId || !capital) return res.status(400).json({ error: "userId and capital are required" });
+    try {
+      const result = await kellyCalculator.getOptimalPositionSize(userId, capital, symbol, confidence);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // --- MARKET REGIME DETECTION ROUTES ---
+
+  // Get regime for a specific symbol
+  app.get("/api/regime/:symbol", async (req, res) => {
+    try {
+      const symbol = req.params.symbol.includes('/') ? req.params.symbol : req.params.symbol.replace('USDT', '/USDT');
+      const timeframe = (req.query.tf as string) || '4h';
+      const result = await regimeDetector.detectRegime(symbol, timeframe);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get overall market regime (scans top coins)
+  app.get("/api/regime", async (_req, res) => {
+    try {
+      const { SCAN_PAIRS } = await import('./engine/marketScanner.ts');
+      const symbols = SCAN_PAIRS.slice(0, 10).map(s => s.replace('USDT', '/USDT'));
+      const summary = await regimeDetector.scanMarketRegime(symbols);
+      res.json(summary);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- AGENT SWARM ROUTES ---
 
   // Trigger the full agent pipeline
@@ -1070,72 +1128,22 @@ async function startServer() {
 
   // Create a new trading goal
   app.post("/api/goals/create", async (req, res) => {
-    const { userId, targetProfit, capital, isPractice, symbol } = req.body;
+    const { userId, targetProfit, capital, isPractice, deadlineDays, maxSlots } = req.body;
     if (!userId || !targetProfit || !capital) {
       return res.status(400).json({ error: "userId, targetProfit, and capital are required" });
     }
     try {
-      // 1. Create the goal
-      const goal = await goalPlanner.createGoal(userId, Number(targetProfit), Number(capital), isPractice ?? true);
-      
-      let tradeInfo = null;
-
-      // 2. Auto-trade pipeline
-      try {
-        let bestPick = null;
-
-        if (symbol) {
-          // User specified a coin
-          const cleanSymbol = symbol.replace('/', '');
-          const bRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`);
-          const bData = await bRes.json();
-          const price = parseFloat(bData.price);
-          if (price && !isNaN(price)) {
-            bestPick = { symbol, price };
-          }
-        } else {
-          // Scan the market for the best opportunity RIGHT NOW
-          const scanResult = await marketScanner.scan();
-          bestPick = scanResult.topOpportunities.find(
-            opp => opp.confluence === 'buy' || opp.confluence === 'strong_buy' || opp.score >= 65
-          );
-        }
-
-        if (bestPick) {
-          // Calculate position size from goal capital
-          const quantity = Number(capital) / bestPick.price;
-          const tpPrice = bestPick.price + (Number(targetProfit) / quantity);
-          
-          // Execute with profitTarget = goal's target
-          await tradeExecutor.execute({
-            userId,
-            symbol: bestPick.symbol,
-            side: 'buy',
-            quantity,
-            mode: 'sentry',
-            isPractice: isPractice ?? true,
-            profitTarget: Number(targetProfit),
-            takeProfitPrice: tpPrice,
-          });
-
-          tradeInfo = {
-            symbol: bestPick.symbol,
-            side: 'buy',
-            quantity,
-            entryPrice: bestPick.price,
-            takeProfitPrice: tpPrice
-          };
-          console.log(`[GOAL PLANNER] Auto-trade executed for goal ${goal.id}: ${tradeInfo.quantity} ${tradeInfo.symbol} @ $${tradeInfo.entryPrice}`);
-        } else {
-           console.log(`[GOAL PLANNER] No suitable auto-trade opportunity found for goal ${goal.id}.`);
-        }
-      } catch (err: any) {
-        console.error("[GOAL PLANNER] Auto-trade pipeline failed:", err);
-      }
-
-      res.json({ status: "success", goal, tradeInfo });
+      const campaign = await goalExecutor.createCampaign(
+        userId, 
+        Number(targetProfit), 
+        Number(capital), 
+        deadlineDays ? Number(deadlineDays) : 7, 
+        isPractice ?? true, 
+        maxSlots ? Number(maxSlots) : 3
+      );
+      res.json({ status: "success", goal: campaign, tradeInfo: null });
     } catch (error: any) {
-      console.error("Failed to create goal:", error);
+      console.error("Failed to create campaign:", error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -1176,6 +1184,49 @@ async function startServer() {
     try {
       await db.collection('tradingGoals').doc(req.params.goalId).delete();
       res.json({ status: "success", message: "Goal deleted" });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // --- CAMPAIGN MANAGEMENT ROUTES ---
+  
+  // Get all campaigns for a user
+  app.get("/api/campaigns/:userId", async (req, res) => {
+    try {
+      const campaigns = await goalExecutor.getUserCampaigns(req.params.userId);
+      res.json({ campaigns });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get a specific campaign
+  app.get("/api/campaigns/detail/:campaignId", async (req, res) => {
+    try {
+      const campaign = await goalExecutor.getCampaign(req.params.campaignId);
+      if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+      res.json({ campaign });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Pause a campaign
+  app.patch("/api/campaigns/:campaignId/pause", async (req, res) => {
+    try {
+      await goalExecutor.pauseCampaign(req.params.campaignId);
+      res.json({ status: "success", message: "Campaign paused" });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Resume a campaign
+  app.patch("/api/campaigns/:campaignId/resume", async (req, res) => {
+    try {
+      await goalExecutor.resumeCampaign(req.params.campaignId);
+      res.json({ status: "success", message: "Campaign resumed" });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -1913,6 +1964,9 @@ Be specific. Reference the actual numbers.`;
             const newProgress = (activeGoal.currentProgress || 0) + (result.realizedPnl || 0);
             await goalPlanner.updateProgress(activeGoal.id, newProgress);
           }
+          
+          // GoalExecutor - Chain trades
+          await goalExecutor.onTradeClosed(result.tradeId || tradeId, result.realizedPnl || 0, tradeData.symbol);
 
           // 4. ConfidenceEngine — Re-evaluate if it was a practice trade
           if (tradeData.isPractice) {

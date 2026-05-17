@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { TrendingUp, TrendingDown, ArrowUpDown, Flame, BarChart3, Zap, ChevronRight } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, BarChart3, ChevronRight, RefreshCw, Flame } from 'lucide-react';
 
 interface CoinData {
   symbol: string;
@@ -19,11 +19,63 @@ interface CoinData {
 
 type SortKey = 'score' | 'change24h' | 'volume24h' | 'price';
 
+/**
+ * Derive a unified verdict from the TA signal + score.
+ * This is the SINGLE source of truth for display.
+ */
+function getVerdict(confluence?: string, score: number = 50): {
+  label: string;
+  icon: 'up' | 'down' | 'dash';
+  color: string;        // text + border color classes
+  bgColor: string;      // pill background
+  rowTint: string;      // subtle row background tint
+} {
+  const isBuy = confluence === 'buy' || confluence === 'strong_buy';
+  const isSell = confluence === 'sell' || confluence === 'strong_sell';
+
+  if (isBuy && score >= 65) {
+    return {
+      label: confluence === 'strong_buy' ? 'STRONG BUY' : 'BUY',
+      icon: 'up',
+      color: 'text-emerald-400 border-emerald-500/40',
+      bgColor: 'bg-emerald-500/20',
+      rowTint: 'bg-emerald-500/[0.03]',
+    };
+  }
+
+  if (isSell) {
+    return {
+      label: confluence === 'strong_sell' ? 'STRONG SELL' : 'SELL',
+      icon: 'down',
+      color: 'text-red-400 border-red-500/40',
+      bgColor: 'bg-red-500/20',
+      rowTint: 'bg-red-500/[0.03]',
+    };
+  }
+
+  // Everything else = HOLD (neutral)
+  return {
+    label: 'HOLD',
+    icon: 'dash',
+    color: 'text-zinc-400 border-zinc-600/40',
+    bgColor: 'bg-zinc-700/20',
+    rowTint: '',
+  };
+}
+
+function VerdictIcon({ type }: { type: 'up' | 'down' | 'dash' }) {
+  if (type === 'up') return <TrendingUp className="w-3.5 h-3.5" />;
+  if (type === 'down') return <TrendingDown className="w-3.5 h-3.5" />;
+  return <Minus className="w-3.5 h-3.5" />;
+}
+
 export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: string) => void }) {
   const [coins, setCoins] = useState<CoinData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [scanning, setScanning] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>('score');
   const [sortAsc, setSortAsc] = useState(false);
+  const [lastScanTime, setLastScanTime] = useState<string>('');
 
   const fetchData = useCallback(async () => {
     try {
@@ -33,6 +85,9 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
         setCoins(data.allResults);
       } else if (data.topOpportunities) {
         setCoins(data.topOpportunities);
+      }
+      if (data.timestamp) {
+        setLastScanTime(new Date(data.timestamp).toLocaleTimeString());
       }
       setLoading(false);
     } catch {
@@ -64,6 +119,25 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
     }
   }, []);
 
+  const triggerScan = useCallback(async () => {
+    setScanning(true);
+    try {
+      const res = await fetch('/api/scanner/scan', { method: 'POST' });
+      const data = await res.json();
+      if (data.allResults) {
+        setCoins(data.allResults);
+      } else if (data.topOpportunities) {
+        setCoins(data.topOpportunities);
+      }
+      if (data.timestamp) {
+        setLastScanTime(new Date(data.timestamp).toLocaleTimeString());
+      }
+    } catch (e) {
+      console.error('Scan failed:', e);
+    }
+    setScanning(false);
+  }, []);
+
   useEffect(() => {
     fetchData();
     const interval = setInterval(fetchData, 30000); // Refresh every 30s
@@ -80,27 +154,10 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
     return (a[sortBy] - b[sortBy]) * mult;
   });
 
-  // Separate into categories
-  const hotPicks = sorted.filter(c => c.score >= 75);
-  const allCoins = sorted;
-
-  const getScoreBadge = (score: number) => {
-    if (score >= 80) return { color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30', label: 'HOT' };
-    if (score >= 70) return { color: 'bg-amber-500/20 text-amber-400 border-amber-500/30', label: 'WARM' };
-    return { color: 'bg-zinc-700/30 text-zinc-500 border-zinc-600/30', label: '' };
-  };
-
-  const getMomentumIcon = (momentum: string) => {
-    if (momentum === 'strong_bull' || momentum === 'bull') return <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />;
-    if (momentum === 'strong_bear' || momentum === 'bear') return <TrendingDown className="w-3.5 h-3.5 text-red-400" />;
-    return <ArrowUpDown className="w-3.5 h-3.5 text-zinc-500" />;
-  };
-
-  const formatVolume = (vol: number) => {
-    if (vol >= 1_000_000_000) return `$${(vol / 1_000_000_000).toFixed(1)}B`;
-    if (vol >= 1_000_000) return `$${(vol / 1_000_000).toFixed(0)}M`;
-    return `$${(vol / 1_000).toFixed(0)}K`;
-  };
+  // Jarvis Picks: ONLY coins with BUY/STRONG_BUY TA signal AND score >= 65
+  const hotPicks = sorted.filter(c =>
+    (c.confluence === 'buy' || c.confluence === 'strong_buy') && c.score >= 65
+  );
 
   if (loading) {
     return (
@@ -116,44 +173,80 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
   return (
     <div className="w-full max-w-6xl mx-auto px-4 py-6 space-y-6 overflow-y-auto h-full">
 
-      {/* Hot Picks Section */}
+      {/* Header with Scan Button */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <BarChart3 className="w-5 h-5 text-amber-400" />
+          <h1 className="text-base font-semibold text-white">Market Scanner</h1>
+          <span className="text-xs text-zinc-600">{coins.length} pairs</span>
+        </div>
+        <div className="flex items-center gap-3">
+          {lastScanTime && (
+            <span className="text-[10px] text-zinc-600">Last scan: {lastScanTime}</span>
+          )}
+          <button
+            onClick={triggerScan}
+            disabled={scanning}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-lg text-xs font-medium hover:bg-emerald-500/30 transition-all disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${scanning ? 'animate-spin' : ''}`} />
+            {scanning ? 'Scanning...' : 'Scan Now'}
+          </button>
+        </div>
+      </div>
+
+      {/* Hot Picks Section — ONLY BUY signals */}
       {hotPicks.length > 0 && (
         <div>
           <div className="flex items-center gap-2 mb-3">
             <Flame className="w-4 h-4 text-amber-400" />
-            <h2 className="text-sm font-semibold text-amber-400 uppercase tracking-wider">Jarvis Picks — Score 75+</h2>
+            <h2 className="text-sm font-semibold text-amber-400 uppercase tracking-wider">Jarvis Picks — Buy Signals</h2>
+            <span className="text-[10px] text-zinc-600 ml-1">({hotPicks.length} found)</span>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-            {hotPicks.map(coin => (
-              <button
-                key={`hot-${coin.symbol}`}
-                onClick={() => onSelectCoin(coin.symbol)}
-                className="bg-gradient-to-br from-amber-500/10 to-zinc-900/80 border border-amber-500/20 rounded-xl p-4 text-left hover:border-amber-500/40 hover:from-amber-500/15 transition-all duration-200 group"
-              >
-                <div className="flex justify-between items-start mb-2">
-                  <div>
-                    <p className="text-white font-semibold text-sm">{coin.symbol}</p>
-                    <span className="text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full px-1.5 py-0.5">
-                      {coin.score}/100
+            {hotPicks.map(coin => {
+              const verdict = getVerdict(coin.confluence, coin.score);
+              return (
+                <button
+                  key={`hot-${coin.symbol}`}
+                  onClick={() => onSelectCoin(coin.symbol)}
+                  className="bg-gradient-to-br from-emerald-500/10 to-zinc-900/80 border border-emerald-500/20 rounded-xl p-4 text-left hover:border-emerald-500/40 hover:from-emerald-500/15 transition-all duration-200 group"
+                >
+                  <div className="flex justify-between items-start mb-2">
+                    <div>
+                      <p className="text-white font-semibold text-sm">{coin.symbol}</p>
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <span className={`inline-flex items-center gap-1 text-[9px] font-bold border rounded-full px-1.5 py-0.5 ${verdict.bgColor} ${verdict.color}`}>
+                          <VerdictIcon type={verdict.icon} />
+                          {verdict.label} {coin.score}
+                        </span>
+                      </div>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-emerald-400 transition-colors" />
+                  </div>
+                  <p className="text-lg font-bold text-white font-mono">
+                    ${coin.price >= 1 ? coin.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : coin.price.toFixed(6)}
+                  </p>
+                  <div className="flex items-center gap-1 mt-1">
+                    <span className={`text-xs font-mono font-medium ${coin.change24h >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {coin.change24h >= 0 ? '+' : ''}{coin.change24h.toFixed(2)}%
                     </span>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-amber-400 transition-colors" />
-                </div>
-                <p className="text-lg font-bold text-white font-mono">
-                  ${coin.price >= 1 ? coin.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : coin.price.toFixed(6)}
-                </p>
-                <div className="flex items-center gap-1 mt-1">
-                  {getMomentumIcon(coin.momentum)}
-                  <span className={`text-xs font-mono font-medium ${coin.change24h >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {coin.change24h >= 0 ? '+' : ''}{coin.change24h.toFixed(2)}%
-                  </span>
-                </div>
-                {coin.rsi && (
-                  <p className="text-[10px] text-zinc-500 mt-1">RSI: {coin.rsi}</p>
-                )}
-              </button>
-            ))}
+                  {coin.rsi && (
+                    <p className="text-[10px] text-zinc-500 mt-1">RSI: {coin.rsi}</p>
+                  )}
+                </button>
+              );
+            })}
           </div>
+        </div>
+      )}
+
+      {/* No Picks Warning */}
+      {hotPicks.length === 0 && (
+        <div className="bg-zinc-900/50 border border-zinc-700/50 rounded-xl p-6 text-center">
+          <p className="text-zinc-400 text-sm">🔍 No strong buy signals detected right now.</p>
+          <p className="text-zinc-600 text-xs mt-1">Jarvis is waiting for better conditions. Check the full list below.</p>
         </div>
       )}
 
@@ -170,48 +263,50 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
           <div className="grid grid-cols-12 gap-2 px-4 py-2.5 border-b border-zinc-800 text-xs text-zinc-500 font-medium uppercase tracking-wider">
             <div className="col-span-3">Asset</div>
             <button onClick={() => handleSort('price')} className="col-span-2 text-right hover:text-zinc-300 transition-colors flex items-center justify-end gap-1">
-              Price {sortBy === 'price' && <Zap className="w-3 h-3 text-amber-400" />}
+              Price
             </button>
             <button onClick={() => handleSort('change24h')} className="col-span-2 text-right hover:text-zinc-300 transition-colors flex items-center justify-end gap-1">
-              24h {sortBy === 'change24h' && <Zap className="w-3 h-3 text-amber-400" />}
+              24h Change
             </button>
-            <button onClick={() => handleSort('volume24h')} className="col-span-2 text-right hover:text-zinc-300 transition-colors flex items-center justify-end gap-1">
-              Volume {sortBy === 'volume24h' && <Zap className="w-3 h-3 text-amber-400" />}
-            </button>
-            <button onClick={() => handleSort('score')} className="col-span-2 text-right hover:text-zinc-300 transition-colors flex items-center justify-end gap-1">
-              Score {sortBy === 'score' && <Zap className="w-3 h-3 text-amber-400" />}
+            <button onClick={() => handleSort('score')} className="col-span-4 text-right hover:text-zinc-300 transition-colors flex items-center justify-end gap-1">
+              Verdict
             </button>
             <div className="col-span-1"></div>
           </div>
 
           {/* Table Rows */}
-          {allCoins.map((coin, i) => {
-            const badge = getScoreBadge(coin.score);
+          {sorted.map((coin, i) => {
+            const verdict = getVerdict(coin.confluence, coin.score);
             return (
               <button
                 key={coin.symbol}
                 onClick={() => onSelectCoin(coin.symbol)}
                 className={`grid grid-cols-12 gap-2 px-4 py-3 w-full text-left hover:bg-zinc-800/50 transition-all duration-150 group
-                  ${i !== allCoins.length - 1 ? 'border-b border-zinc-800/50' : ''}`}
+                  ${verdict.rowTint}
+                  ${i !== sorted.length - 1 ? 'border-b border-zinc-800/50' : ''}`}
               >
                 {/* Asset */}
                 <div className="col-span-3 flex items-center gap-2.5">
-                  {getMomentumIcon(coin.momentum)}
+                  <div className={`w-1.5 h-8 rounded-full ${
+                    verdict.icon === 'up' ? 'bg-emerald-500/60' :
+                    verdict.icon === 'down' ? 'bg-red-500/60' :
+                    'bg-zinc-700/40'
+                  }`} />
                   <div>
                     <p className="text-white font-medium text-sm">{coin.symbol.replace('/USDT', '')}</p>
-                    <p className="text-[10px] text-zinc-600">{coin.momentum.replace('_', ' ')}</p>
+                    {coin.rsi && <p className="text-[10px] text-zinc-600">RSI: {coin.rsi}</p>}
                   </div>
                 </div>
 
                 {/* Price */}
-                <div className="col-span-2 text-right">
+                <div className="col-span-2 text-right flex items-center justify-end">
                   <p className="text-white font-mono text-sm">
                     ${coin.price >= 1 ? coin.price.toLocaleString(undefined, { maximumFractionDigits: 2 }) : coin.price.toFixed(4)}
                   </p>
                 </div>
 
                 {/* 24h Change */}
-                <div className="col-span-2 text-right">
+                <div className="col-span-2 text-right flex items-center justify-end">
                   <span className={`text-sm font-mono font-medium px-2 py-0.5 rounded ${
                     coin.change24h >= 0 ? 'text-emerald-400 bg-emerald-500/10' : 'text-red-400 bg-red-500/10'
                   }`}>
@@ -219,19 +314,13 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
                   </span>
                 </div>
 
-                {/* Volume */}
-                <div className="col-span-2 text-right">
-                  <p className="text-zinc-400 text-sm font-mono">{formatVolume(coin.volume24h)}</p>
-                </div>
-
-                {/* Score */}
-                <div className="col-span-2 text-right flex items-center justify-end gap-1.5">
-                  <span className={`text-xs font-bold border rounded-full px-2 py-0.5 ${badge.color}`}>
-                    {coin.score}
+                {/* Unified Verdict — Signal + Score combined */}
+                <div className="col-span-4 flex items-center justify-end gap-2">
+                  <span className={`inline-flex items-center gap-1.5 text-[11px] font-bold border rounded-full px-3 py-1 ${verdict.bgColor} ${verdict.color}`}>
+                    <VerdictIcon type={verdict.icon} />
+                    {verdict.label}
+                    <span className="opacity-70 ml-0.5">{coin.score}</span>
                   </span>
-                  {badge.label && (
-                    <span className={`text-[9px] font-bold ${badge.color} rounded px-1`}>{badge.label}</span>
-                  )}
                 </div>
 
                 {/* Arrow */}

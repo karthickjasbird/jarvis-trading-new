@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.2.0",
   "buildDate": "2026-05-14",
-  "changelog": "Multi-tenant user isolation, OWNER_USER_ID scoping, Firestore security rules"
+  "changelog": "v1.2.0: Campaign Manager (autonomous multi-trade goal campaigns), Market Regime Detection (ADX/ATR/EMA trending/ranging/volatile classification), Kelly Position Sizing (mathematically optimal bet sizing from trade history), Scanner Intelligence Rewrite (TA-driven scoring, BUY/SELL badges, Scan Now button), parallel TA processing for 5x faster scans"
 }

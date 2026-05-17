@@ -15,6 +15,7 @@ export class SentryEngine {
   private marketState: any;
   private memoryManager: MemoryManager;
   private ownerId: string; // Scopes all queries to this user's data only
+  private goalExecutor: any = null;
 
   // Per-user Circuit Breaker state
   private circuitBreakers: Map<string, {
@@ -37,6 +38,10 @@ export class SentryEngine {
     this.marketState = marketState;
     this.memoryManager = memoryManager;
     this.ownerId = ownerId || '';
+  }
+
+  setGoalExecutor(executor: any) {
+    this.goalExecutor = executor;
   }
 
   private getCircuitBreaker(userId: string) {
@@ -285,6 +290,10 @@ export class SentryEngine {
               if (activeGoal) {
                 const newProgress = (activeGoal.currentProgress || 0) + (result.realizedPnl || 0);
                 await goalPlanner.updateProgress(activeGoal.id, newProgress);
+              }
+
+              if (this.goalExecutor) {
+                await this.goalExecutor.onTradeClosed(trade.id, result.realizedPnl || 0, trade.symbol);
               }
 
               if (trade.isPractice) {
@@ -601,6 +610,10 @@ export class SentryEngine {
             if (activeGoal) {
               const newProgress = (activeGoal.currentProgress || 0) + (result.realizedPnl || 0);
               await goalPlanner.updateProgress(activeGoal.id, newProgress);
+            }
+
+            if (this.goalExecutor) {
+              await this.goalExecutor.onTradeClosed(doc.id, result.realizedPnl || 0, trade.symbol);
             }
 
             // 4. Confidence Engine

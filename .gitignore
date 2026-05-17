@@ -7,3 +7,5 @@ coverage/
 .env*
 !.env.example
 .owner_user_id
+serviceAccountKey*.json
+firebaseConfig.ts

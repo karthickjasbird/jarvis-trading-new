@@ -59,6 +59,10 @@ function scanEngines(projectRoot: string): EngineInfo[] {
     'atrCalculator.ts': 'ATR-based dynamic position sizing',
     'backtestEngine.ts': 'Historical backtesting engine',
     'userSecrets.ts': 'Per-user encrypted API key storage',
+    'goalExecutor.ts': 'Autonomous campaign manager — multi-trade goal execution with trade chaining, slot management, and auto-compounding',
+    'regimeDetector.ts': 'Market regime detection — classifies markets as trending_up, trending_down, ranging, or volatile using ADX/ATR/EMA',
+    'kellyCalculator.ts': 'Kelly Criterion position sizing — mathematically optimal bet sizes based on historical win rate and payoff ratios',
+    'manifestGenerator.ts': 'Self-awareness system — auto-scans codebase to generate Jarvis knowledge manifest',
   };
 
   const ownerScopedEngines = ['sentry.ts', 'agentSwarm.ts', 'positionMonitor.ts', 'portfolioIntel.ts'];
@@ -165,6 +169,10 @@ export function generateAppManifest(projectRoot: string): AppManifest {
     'Web scraping and targeted learning from any URL',
     'Multi-tenant: each user runs their own isolated instance',
     'Auto-updating: version checker compares local vs GitHub',
+    'Campaign Manager: autonomous multi-trade goal campaigns with trade chaining and auto-compounding',
+    'Market Regime Detection: ADX/ATR/EMA-based trending/ranging/volatile classification',
+    'Kelly Position Sizing: mathematically optimal bet sizing from historical trade data',
+    'TA-driven market scoring: bearish coins can never score above 45, only BUY signals in Jarvis Picks',
   ];
 
   return {

@@ -287,14 +287,15 @@ const updateRiskSettingsTool: FunctionDeclaration = {
 
 const createTradingGoalTool: FunctionDeclaration = {
   name: 'createTradingGoal',
-  description: 'Create a new autonomous trading goal to reach a specific target profit using a set amount of capital.',
+  description: 'Launch an autonomous trading CAMPAIGN to reach a target profit. This creates a multi-trade campaign where Jarvis splits capital across multiple coins simultaneously, chains trades (when one closes, it automatically finds the next opportunity), compounds profits, and tracks progress against a deadline. Use this when the user says things like "make me X profit from Y capital" or "turn X into Y in Z days".',
   parameters: {
     type: Type.OBJECT,
     properties: {
       targetProfit: { type: Type.NUMBER, description: 'The target profit amount in dollars (e.g., 15 for $15).' },
       capital: { type: Type.NUMBER, description: 'The total capital to allocate to this goal in dollars (e.g., 10000).' },
       isPractice: { type: Type.BOOLEAN, description: 'Whether this goal should use practice money (paper wallet) or real money. Default is true (practice mode).' },
-      symbol: { type: Type.STRING, description: 'Optional. The specific coin to trade if the user mentions one (e.g., "DOGE/USDT"). If omitted, the system will autonomously scan and pick the best coin.' }
+      deadlineDays: { type: Type.NUMBER, description: 'The deadline in days to achieve the goal (e.g., 7 for 1 week). Default is 7.' },
+      maxSlots: { type: Type.NUMBER, description: 'The maximum number of simultaneous trades to run for this campaign. Default is 3.' }
     },
     required: ['targetProfit', 'capital', 'isPractice']
   }
@@ -312,6 +313,30 @@ const inspectSystemTool: FunctionDeclaration = {
       }
     },
     required: ['aspect']
+  }
+};
+
+const checkMarketRegimeTool: FunctionDeclaration = {
+  name: 'checkMarketRegime',
+  description: 'Detect the current market regime (trending up, trending down, ranging, or volatile) for a specific coin or the overall market. Returns ADX, ATR, Bollinger Band width, EMA alignment, and trading recommendations. Use when the user asks "what is the market doing?", "should I trade right now?", or "is the market trending?".',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      symbol: { type: Type.STRING, description: 'Optional. Specific symbol like "BTC/USDT". If omitted, scans the top 10 coins for overall market regime.' }
+    },
+    required: []
+  }
+};
+
+const getKellyStatsTool: FunctionDeclaration = {
+  name: 'getKellyStats',
+  description: 'Get Kelly Criterion position sizing statistics based on trading history. Returns win rate, average win/loss, payoff ratio, optimal bet size, current streak, and per-coin performance. Use when the user asks "how much should I bet?", "what is my win rate?", "how are my stats?", or "what size position should I take?".',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      userId: { type: Type.STRING, description: 'The user ID to get stats for.' }
+    },
+    required: ['userId']
   }
 };
 
@@ -667,7 +692,7 @@ ${morningBriefing}`;
             },
           },
           tools: [
-            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, switchTradingModeTool, getMarketPriceTool, executeTradeTool, closePositionTool, panicCloseAllTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool, studyWebsiteTool, deepStudyWebsiteTool, createTradingGoalTool, inspectSystemTool] }
+            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, switchTradingModeTool, getMarketPriceTool, executeTradeTool, closePositionTool, panicCloseAllTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool, studyWebsiteTool, deepStudyWebsiteTool, createTradingGoalTool, inspectSystemTool, checkMarketRegimeTool, getKellyStatsTool] }
           ],
           systemInstruction: systemInstruction,
           inputAudioTranscription: {},
@@ -968,8 +993,8 @@ ${morningBriefing}`;
                       response = { status: 'error', message: 'Failed to update risk settings' };
                     }
                   } else if (call.name === 'createTradingGoal') {
-                    const { targetProfit, capital, isPractice, symbol: goalSymbol } = call.args as any;
-                    setPipelineAction('trading', `Creating Goal: $${targetProfit} profit...`, '#a855f7');
+                    const { targetProfit, capital, isPractice, deadlineDays, maxSlots } = call.args as any;
+                    setPipelineAction('trading', `Creating Campaign: $${targetProfit} in ${deadlineDays || 7}d...`, '#a855f7');
                     try {
                       const { auth } = await import('../firebase');
                       if (auth.currentUser) {
@@ -981,18 +1006,18 @@ ${morningBriefing}`;
                             targetProfit, 
                             capital, 
                             isPractice,
-                            symbol: goalSymbol
+                            deadlineDays: deadlineDays || 7,
+                            maxSlots: maxSlots || 3
                           })
                         });
                         const data = await res.json();
                         if (res.ok && data.status === 'success') {
-                          const coinInfo = data.tradeInfo ? `\nAuto-trade executed: ${data.tradeInfo.side.toUpperCase()} ${data.tradeInfo.symbol} at $${data.tradeInfo.entryPrice}` : '';
-                          const msg = `Goal Created: $${targetProfit} profit using $${capital} (${isPractice ? 'Practice' : 'Real'} Mode)${coinInfo}`;
+                          const msg = `Campaign Created: $${targetProfit} profit using $${capital} in ${deadlineDays || 7} days (${isPractice ? 'Practice' : 'Real'} Mode)`;
                           toast.success(msg, {
                             style: { backgroundColor: '#a855f7', color: 'white', border: 'none', whiteSpace: 'pre-line' }
                           });
-                          clearPipelineAction('✓ Goal Active');
-                          response = { status: 'success', message: `Trading goal set successfully. ${data.tradeInfo ? `I automatically picked ${data.tradeInfo.symbol} and entered the trade.` : `I will monitor the market.`}` };
+                          clearPipelineAction('✓ Campaign Active');
+                          response = { status: 'success', message: `Trading campaign started successfully. I will autonomously manage multiple trades to reach the target within ${deadlineDays || 7} days.` };
                         } else {
                           throw new Error(data.error || 'Failed to create goal');
                         }
@@ -1395,6 +1420,83 @@ ${morningBriefing}`;
                     } catch (e: any) {
                       clearPipelineAction();
                       response = { status: 'error', message: `Failed to inspect system: ${e.message}` };
+                    }
+                  } else if (call.name === 'checkMarketRegime') {
+                    const { symbol } = call.args as any;
+                    setPipelineAction('regime', symbol ? `Detecting regime: ${symbol}...` : 'Scanning market regime...', '#f97316');
+                    try {
+                      if (symbol) {
+                        const cleanSymbol = symbol.replace('/', '');
+                        const res = await fetch(`/api/regime/${cleanSymbol}`);
+                        const data = await res.json();
+                        clearPipelineAction(`✓ ${data.regime}`);
+                        response = {
+                          status: 'success',
+                          symbol: data.symbol,
+                          regime: data.regime,
+                          confidence: data.confidence,
+                          adx: data.adx,
+                          atrPercent: data.atrPercent,
+                          bbWidth: data.bbWidth,
+                          emaAlignment: data.emaAlignment,
+                          shouldTrade: data.recommendations?.shouldTrade,
+                          strategyType: data.recommendations?.strategyType,
+                          recommendation: data.recommendations?.reason,
+                          message: `${data.symbol} is currently in a ${data.regime.replace('_', ' ')} regime with ${data.confidence}% confidence. ${data.recommendations?.reason || ''}`
+                        };
+                      } else {
+                        const res = await fetch('/api/regime');
+                        const data = await res.json();
+                        clearPipelineAction(`✓ ${data.overallRegime}`);
+                        const regimeSummary = data.regimes?.slice(0, 5).map((r: any) =>
+                          `${r.symbol}: ${r.regime.replace('_', ' ')} (ADX: ${r.adx})`
+                        ).join(', ');
+                        response = {
+                          status: 'success',
+                          overallRegime: data.overallRegime,
+                          marketHealth: data.marketHealth,
+                          trendingCount: data.trendingCount,
+                          rangingCount: data.rangingCount,
+                          volatileCount: data.volatileCount,
+                          topRegimes: regimeSummary,
+                          message: `Market is ${data.overallRegime.replace('_', ' ')} (health: ${data.marketHealth}). ${data.trendingCount} trending, ${data.rangingCount} ranging, ${data.volatileCount} volatile out of ${data.regimes?.length || 0} coins scanned.`
+                        };
+                      }
+                    } catch (e: any) {
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to detect market regime: ${e.message}` };
+                    }
+                  } else if (call.name === 'getKellyStats') {
+                    const { userId } = call.args as any;
+                    setPipelineAction('kelly', 'Calculating Kelly sizing...', '#8b5cf6');
+                    try {
+                      const res = await fetch(`/api/kelly/${userId}`);
+                      const data = await res.json();
+                      clearPipelineAction('✓ Stats ready');
+                      const o = data.overall || {};
+                      const topCoins = (data.bySymbol || []).slice(0, 3).map((s: any) =>
+                        `${s.symbol}: ${(s.stats.winRate * 100).toFixed(0)}% WR, $${s.stats.edge?.toFixed(2)} edge`
+                      ).join(' | ');
+                      response = {
+                        status: 'success',
+                        totalTrades: o.totalTrades,
+                        winRate: `${(o.winRate * 100).toFixed(1)}%`,
+                        wins: o.wins,
+                        losses: o.losses,
+                        avgWin: `$${o.avgWin?.toFixed(2)}`,
+                        avgLoss: `$${o.avgLoss?.toFixed(2)}`,
+                        payoffRatio: `${o.payoffRatio?.toFixed(2)}x`,
+                        recommendedRisk: `${o.recommendedRiskPercent}%`,
+                        edge: `$${o.edge?.toFixed(2)} per trade`,
+                        currentStreak: o.streakData?.currentStreak,
+                        longestWinStreak: o.streakData?.longestWinStreak,
+                        longestLossStreak: o.streakData?.longestLossStreak,
+                        topCoins,
+                        message: `Based on ${o.totalTrades} trades: ${(o.winRate * 100).toFixed(1)}% win rate, ${o.payoffRatio?.toFixed(2)}x payoff ratio. Kelly recommends risking ${o.recommendedRiskPercent}% per trade. Edge: $${o.edge?.toFixed(2)} per trade. ${o.streakData?.currentStreak > 0 ? `Currently on a ${o.streakData.currentStreak}-trade win streak!` : o.streakData?.currentStreak < 0 ? `Currently on a ${Math.abs(o.streakData.currentStreak)}-trade loss streak.` : ''}`
+                      };
+                    } catch (e: any) {
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to get Kelly stats: ${e.message}` };
                     }
                   }
 

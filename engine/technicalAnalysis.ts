@@ -8,7 +8,7 @@
  * This replaces the "ask AI to guess" approach with hard data.
  */
 
-import { RSI, MACD, EMA, BollingerBands, ATR } from 'technicalindicators';
+import { RSI, MACD, EMA, BollingerBands, ATR, ADX } from 'technicalindicators';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -30,6 +30,7 @@ export interface IndicatorSnapshot {
   ema200: number | null;
   bollingerBands: { upper: number; middle: number; lower: number } | null;
   atr: number | null;
+  adx: number | null;
   price: number;
   volume: number;
 }
@@ -145,6 +146,10 @@ export class TechnicalAnalysisEngine {
     const atrValues = ATR.calculate({ high: highs, low: lows, close: closes, period: 14 });
     const atr = atrValues.length > 0 ? atrValues[atrValues.length - 1] : null;
 
+    // ADX (14-period) — trend strength
+    const adxValues = ADX.calculate({ close: closes, high: highs, low: lows, period: 14 });
+    const adx = adxValues.length > 0 ? adxValues[adxValues.length - 1].adx : null;
+
     return {
       rsi,
       macd,
@@ -154,6 +159,7 @@ export class TechnicalAnalysisEngine {
       ema200,
       bollingerBands,
       atr,
+      adx,
       price: currentPrice,
       volume: currentVolume,
     };
@@ -166,17 +172,43 @@ export class TechnicalAnalysisEngine {
     const reasons: string[] = [];
     let score = 0; // -100 to +100
 
+    // ── Determine trend context from ADX + EMA alignment + Price Action ──
+    // This prevents "buy the dip" signals in confirmed or sudden downtrends
+    const isTrending = (ind.adx !== null && ind.adx > 25);
+    const isPriceDumping = ind.ema50 !== null && ind.price < (ind.ema50 * 0.985); // Price dropped 1.5% below EMA50
+    const isPriceSurging = ind.ema50 !== null && ind.price > (ind.ema50 * 1.015);
+    
+    const isBearishTrend = (isTrending || isPriceDumping) && ind.ema9 !== null && ind.ema21 !== null && ind.ema9 < ind.ema21;
+    const isBullishTrend = (isTrending || isPriceSurging) && ind.ema9 !== null && ind.ema21 !== null && ind.ema9 > ind.ema21;
+
     // ── RSI ──
     if (ind.rsi !== null) {
       if (ind.rsi < 30) {
-        score += 20;
-        reasons.push(`RSI oversold (${ind.rsi.toFixed(1)})`);
+        if (isBearishTrend) {
+          // In a downtrend, oversold RSI confirms bearishness — NOT a buy signal
+          score -= 5;
+          reasons.push(`RSI oversold (${ind.rsi.toFixed(1)}) but DOWNTREND active — confirms weakness`);
+        } else {
+          score += 20;
+          reasons.push(`RSI oversold (${ind.rsi.toFixed(1)}) — potential bounce`);
+        }
       } else if (ind.rsi < 40) {
-        score += 10;
-        reasons.push(`RSI approaching oversold (${ind.rsi.toFixed(1)})`);
+        if (isBearishTrend) {
+          score -= 3;
+          reasons.push(`RSI weak (${ind.rsi.toFixed(1)}) in downtrend — bearish continuation`);
+        } else {
+          score += 10;
+          reasons.push(`RSI approaching oversold (${ind.rsi.toFixed(1)})`);
+        }
       } else if (ind.rsi > 70) {
-        score -= 20;
-        reasons.push(`RSI overbought (${ind.rsi.toFixed(1)})`);
+        if (isBullishTrend) {
+          // In an uptrend, overbought RSI is expected — less bearish
+          score -= 5;
+          reasons.push(`RSI overbought (${ind.rsi.toFixed(1)}) but UPTREND active — momentum strong`);
+        } else {
+          score -= 20;
+          reasons.push(`RSI overbought (${ind.rsi.toFixed(1)})`);
+        }
       } else if (ind.rsi > 60) {
         score -= 5;
         reasons.push(`RSI elevated (${ind.rsi.toFixed(1)})`);
@@ -233,17 +265,40 @@ export class TechnicalAnalysisEngine {
       }
     }
 
+    // ── ADX Trend Strength ──
+    if (ind.adx !== null) {
+      if (ind.adx > 40) {
+        // Very strong trend — amplify the directional bias
+        const trendBonus = isBullishTrend ? 10 : isBearishTrend ? -10 : 0;
+        score += trendBonus;
+        if (trendBonus !== 0) reasons.push(`Strong trend (ADX: ${ind.adx.toFixed(0)}) — amplified ${isBullishTrend ? 'bullish' : 'bearish'} bias`);
+      } else if (ind.adx < 15) {
+        reasons.push(`Very weak trend (ADX: ${ind.adx.toFixed(0)}) — choppy market`);
+      }
+    }
+
     // ── Bollinger Bands ──
     if (ind.bollingerBands) {
       const bb = ind.bollingerBands;
       const bbWidth = ((bb.upper - bb.lower) / bb.middle) * 100;
 
       if (ind.price <= bb.lower) {
-        score += 15;
-        reasons.push('Price at lower Bollinger Band (potential bounce)');
+        if (isBearishTrend) {
+          // In downtrend, hitting lower BB is trend continuation, NOT bounce
+          score -= 5;
+          reasons.push('Price breaking lower Bollinger Band — bearish expansion');
+        } else {
+          score += 15;
+          reasons.push('Price at lower Bollinger Band (potential bounce)');
+        }
       } else if (ind.price >= bb.upper) {
-        score -= 10;
-        reasons.push('Price at upper Bollinger Band (potential reversal)');
+        if (isBullishTrend) {
+          score += 5;
+          reasons.push('Price riding upper Bollinger Band — bullish momentum');
+        } else {
+          score -= 10;
+          reasons.push('Price at upper Bollinger Band (potential reversal)');
+        }
       }
 
       if (bbWidth < 3) {
@@ -404,6 +459,7 @@ export class TechnicalAnalysisEngine {
       ema200: null,
       bollingerBands: null,
       atr: null,
+      adx: null,
       price: last?.close || 0,
       volume: last?.volume || 0,
     };
