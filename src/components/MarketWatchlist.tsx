@@ -81,6 +81,7 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
   const [coins, setCoins] = useState<CoinData[]>([]);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<SortKey>('score');
   const [sortAsc, setSortAsc] = useState(false);
   const [lastScanTime, setLastScanTime] = useState<string>('');
@@ -99,6 +100,7 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
   }, []);
 
   const fetchData = useCallback(async () => {
+    setScanError(null);
     try {
       if (assetClass === 'crypto') {
         const res = await fetch('/api/scanner/latest');
@@ -112,13 +114,19 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
         setLastScanTime(new Date().toLocaleTimeString());
       }
       setLoading(false);
-    } catch {
+    } catch (err: any) {
       // For the crypto tab, fall back to a direct Binance read so the UI
       // still renders if our scanner endpoint is down. Stocks have no
-      // equivalent free fallback — surface empty results.
+      // equivalent free fallback — surface the failure inline so the
+      // user knows why the table is empty instead of staring at blank space.
       if (assetClass !== 'crypto') {
         setCoins([]);
         setLoading(false);
+        setScanError(
+          assetClass === 'commodities'
+            ? 'Commodities feed temporarily unavailable. Try the Crypto tab or hit Scan Now to retry.'
+            : 'Stocks feed temporarily unavailable. Try the Crypto tab or hit Scan Now to retry.'
+        );
         return;
       }
       try {
@@ -150,6 +158,7 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
 
   const triggerScan = useCallback(async () => {
     setScanning(true);
+    setScanError(null);
     try {
       if (assetClass === 'crypto') {
         const res = await fetch('/api/scanner/scan', { method: 'POST' });
@@ -164,6 +173,13 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
       }
     } catch (e) {
       console.error('Scan failed:', e);
+      if (assetClass !== 'crypto') {
+        setScanError(
+          assetClass === 'commodities'
+            ? 'Commodities feed temporarily unavailable.'
+            : 'Stocks feed temporarily unavailable.'
+        );
+      }
     }
     setScanning(false);
   }, [assetClass, fetchStocks]);
@@ -283,6 +299,14 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
           );
         })}
       </div>
+
+      {/* Feed-error banner (Phase 8.4 polish) */}
+      {scanError && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3 flex items-start gap-2">
+          <span className="text-amber-400 text-sm">⚠️</span>
+          <p className="text-amber-300 text-xs leading-relaxed">{scanError}</p>
+        </div>
+      )}
 
       {/* Hot Picks Section — ONLY BUY signals */}
       {hotPicks.length > 0 && (

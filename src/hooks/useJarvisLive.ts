@@ -1384,7 +1384,7 @@ ${morningBriefing}`;
                     setPipelineAction('sentiment', `Sentiment: ${asset}...`, '#a855f7');
                     toast.info(`Consulting News Sentiment Analyst for ${asset}...`);
                     try {
-                      const res = await fetch('/api/data/sentiment');
+                      const res = await fetch('/api/data/news');
                       const data = await res.json();
                       const relevantArticles = (data.data || []).filter((a: any) =>
                         a.title.toLowerCase().includes(asset.toLowerCase()) ||

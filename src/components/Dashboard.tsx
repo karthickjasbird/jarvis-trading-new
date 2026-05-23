@@ -607,8 +607,9 @@ export function Dashboard({
                 <div className="px-6 pb-4">
                   <div className="bg-zinc-950 rounded-xl border border-zinc-800/80 p-4 font-mono text-xs h-[300px] overflow-y-auto flex flex-col gap-2">
                     {sentryLogs.length === 0 ? (
-                      <div className="text-zinc-600 flex items-center justify-center h-full">
-                        Sentry Engine is idle. Waiting for activation...
+                      <div className="text-zinc-600 flex flex-col items-center justify-center h-full gap-1 text-center">
+                        <span>👁️ Sentry is watching — no events yet.</span>
+                        <span className="text-[10px] text-zinc-700">Logs appear here when a position triggers SL/TP, trailing stop, or circuit-breaker actions.</span>
                       </div>
                     ) : (
                       sentryLogs.map((log) => (
