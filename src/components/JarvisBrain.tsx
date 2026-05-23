@@ -580,6 +580,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
 
   // Campaign state (autonomous multi-trade campaigns from Phase 8.5)
   const [campaigns, setCampaigns] = useState<any[]>([]);
+  const [showHiddenCampaigns, setShowHiddenCampaigns] = useState(false);
 
   // Scanner state
   const [scanData, setScanData] = useState<any>(null);
@@ -794,6 +795,42 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
       toast.success('Goal deleted');
     } catch (err) {
       toast.error('Failed to delete goal');
+    }
+  };
+
+  // Campaign control handlers (Phase 8.5 — pause / resume / cancel).
+  // The Firestore listener reconciles state, so we just call the API and
+  // surface a toast — no local mutation needed.
+  const handlePauseCampaign = async (campaignId: string) => {
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/pause`, { method: 'PATCH' });
+      if (!res.ok) throw new Error('pause failed');
+      toast.success('Campaign paused');
+    } catch {
+      toast.error('Failed to pause campaign');
+    }
+  };
+  const handleResumeCampaign = async (campaignId: string) => {
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/resume`, { method: 'PATCH' });
+      if (!res.ok) throw new Error('resume failed');
+      toast.success('Campaign resumed');
+    } catch {
+      toast.error('Failed to resume campaign');
+    }
+  };
+  const handleCancelCampaign = async (campaignId: string, activeCount: number) => {
+    const confirmMsg = activeCount > 0
+      ? `Cancel this campaign? This will CLOSE ${activeCount} open position${activeCount === 1 ? '' : 's'} and release the capital. This cannot be undone.`
+      : 'Cancel this campaign? It has no open positions but will be marked cancelled.';
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/cancel`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'cancel failed');
+      toast.success(data.message || 'Campaign cancelled');
+    } catch (err: any) {
+      toast.error(`Failed to cancel campaign: ${err.message}`);
     }
   };
 
@@ -1254,108 +1291,179 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
       </div>
 
       {/* Active Campaigns (Phase 8.5 — autonomous multi-trade campaigns) */}
-      {campaigns.length > 0 && (
-        <div style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <Zap className="w-4 h-4 text-cyan-400" />
-              <span className="text-sm font-semibold text-zinc-300 tracking-wide">ACTIVE CAMPAIGNS</span>
-              <span className="text-[10px] text-zinc-600">
-                ({campaigns.filter((c: any) => c.status === 'active').length} running)
-              </span>
-            </div>
-          </div>
-          <div className="space-y-3">
-            {campaigns.slice(0, 3).map((c: any) => {
-              const realized = c.realizedProfit ?? 0;
-              const target = c.targetProfit ?? 1;
-              const progress = Math.max(0, Math.min(100, (realized / target) * 100));
-              const isComplete = c.status === 'completed';
-              const isPaused = c.status === 'paused';
-              const isExpired = c.status === 'expired';
-              const activeCount = (c.activeTradeIds || []).length;
-              const completedCount = (c.completedTradeIds || []).length;
+      {campaigns.length > 0 && (() => {
+        const activeList = campaigns.filter((c: any) => c.status === 'active');
+        const hiddenList = campaigns.filter((c: any) => c.status !== 'active');
 
-              const msLeft = c.deadline ? new Date(c.deadline).getTime() - Date.now() : 0;
-              const hoursLeft = msLeft / 3_600_000;
-              const deadlineStr = msLeft <= 0
-                ? 'expired'
-                : hoursLeft < 24
-                  ? `${hoursLeft.toFixed(1)}h left`
-                  : `${(hoursLeft / 24).toFixed(1)}d left`;
+        const renderCampaign = (c: any) => {
+          const realized = c.realizedProfit ?? 0;
+          const target = c.targetProfit ?? 1;
+          const progress = Math.max(0, Math.min(100, (realized / target) * 100));
+          const isActive    = c.status === 'active';
+          const isComplete  = c.status === 'completed';
+          const isPaused    = c.status === 'paused';
+          const isExpired   = c.status === 'expired';
+          const isCancelled = c.status === 'cancelled';
+          const isTerminal  = isComplete || isExpired || isCancelled;
+          const activeCount = (c.activeTradeIds || []).length;
+          const completedCount = (c.completedTradeIds || []).length;
 
-              const urgencyConfig: Record<string, { color: string; bg: string }> = {
-                relaxed:  { color: 'text-blue-400',  bg: 'bg-blue-500/10 border-blue-500/20' },
-                normal:   { color: 'text-zinc-400',  bg: 'bg-zinc-700/30 border-zinc-600/30' },
-                urgent:   { color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20' },
-                critical: { color: 'text-red-400',   bg: 'bg-red-500/10 border-red-500/20' },
-              };
-              const urgCfg = urgencyConfig[c.urgency] || urgencyConfig.normal;
+          const msLeft = c.deadline ? new Date(c.deadline).getTime() - Date.now() : 0;
+          const hoursLeft = msLeft / 3_600_000;
+          const deadlineStr = msLeft <= 0
+            ? 'expired'
+            : hoursLeft < 24
+              ? `${hoursLeft.toFixed(1)}h left`
+              : `${(hoursLeft / 24).toFixed(1)}d left`;
 
-              return (
-                <motion.div
-                  key={c.id}
-                  className={`bg-zinc-900/60 border rounded-xl p-4 ${
-                    isComplete ? 'border-emerald-500/40' :
-                    isExpired  ? 'border-red-500/30' :
-                    isPaused   ? 'border-zinc-700' :
-                                 'border-cyan-500/20'
-                  }`}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                >
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      {isComplete ? <Trophy className="w-4 h-4 text-emerald-400" /> :
-                       isPaused   ? <Pause className="w-4 h-4 text-zinc-500" /> :
-                                    <Zap className="w-4 h-4 text-cyan-400" />}
-                      <span className="text-sm font-bold text-zinc-200 font-mono">
-                        ${realized.toFixed(2)} / ${target.toLocaleString()}
-                      </span>
-                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider border ${urgCfg.bg} ${urgCfg.color}`}>
-                        {c.urgency || 'normal'}
-                      </span>
+          const urgencyConfig: Record<string, { color: string; bg: string }> = {
+            relaxed:  { color: 'text-blue-400',  bg: 'bg-blue-500/10 border-blue-500/20' },
+            normal:   { color: 'text-zinc-400',  bg: 'bg-zinc-700/30 border-zinc-600/30' },
+            urgent:   { color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20' },
+            critical: { color: 'text-red-400',   bg: 'bg-red-500/10 border-red-500/20' },
+          };
+          const urgCfg = urgencyConfig[c.urgency] || urgencyConfig.normal;
+
+          return (
+            <motion.div
+              key={c.id}
+              className={`bg-zinc-900/60 border rounded-xl p-4 ${
+                isComplete  ? 'border-emerald-500/40' :
+                isExpired   ? 'border-red-500/30' :
+                isCancelled ? 'border-zinc-700 opacity-60' :
+                isPaused    ? 'border-zinc-700' :
+                              'border-cyan-500/20'
+              }`}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  {isComplete  ? <Trophy className="w-4 h-4 text-emerald-400" /> :
+                   isPaused    ? <Pause className="w-4 h-4 text-zinc-500" /> :
+                   isCancelled ? <Trash2 className="w-4 h-4 text-zinc-600" /> :
+                                 <Zap className="w-4 h-4 text-cyan-400" />}
+                  <span className="text-sm font-bold text-zinc-200 font-mono">
+                    ${realized.toFixed(2)} / ${target.toLocaleString()}
+                  </span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider border ${urgCfg.bg} ${urgCfg.color}`}>
+                    {c.urgency || 'normal'}
+                  </span>
+                  {!isActive && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full font-semibold uppercase tracking-wider bg-zinc-800 text-zinc-500 border border-zinc-700">
+                      {c.status}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-mono font-bold ${
+                    isComplete    ? 'text-emerald-400' :
+                    realized < 0  ? 'text-red-400' :
+                                    'text-zinc-400'
+                  }`}>
+                    {progress.toFixed(1)}%
+                  </span>
+                  {/* Action buttons — terminal states get none */}
+                  {!isTerminal && (
+                    <div className="flex items-center gap-1 ml-2">
+                      {isActive ? (
+                        <button
+                          onClick={() => handlePauseCampaign(c.id)}
+                          className="p-1.5 rounded-lg text-zinc-500 hover:text-amber-400 hover:bg-amber-500/10 transition-colors"
+                          title="Pause — stops new deployments, keeps existing positions running"
+                        >
+                          <Pause className="w-3.5 h-3.5" />
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleResumeCampaign(c.id)}
+                          className="p-1.5 rounded-lg text-zinc-500 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                          title="Resume — start opening new trades again"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleCancelCampaign(c.id, activeCount)}
+                        className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                        title={`Cancel — closes ${activeCount} open position${activeCount === 1 ? '' : 's'} and frees the capital`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
-                    <span className={`text-xs font-mono font-bold ${
-                      isComplete    ? 'text-emerald-400' :
-                      realized < 0  ? 'text-red-400' :
-                                      'text-zinc-400'
-                    }`}>
-                      {progress.toFixed(1)}%
-                    </span>
-                  </div>
+                  )}
+                </div>
+              </div>
 
-                  {/* Progress bar */}
-                  <div className="relative h-2 bg-zinc-800 rounded-full overflow-hidden mb-3">
-                    <motion.div
-                      className={`absolute inset-y-0 left-0 rounded-full ${
-                        isComplete   ? 'bg-emerald-500' :
-                        realized < 0 ? 'bg-red-500/60' :
-                                       'bg-gradient-to-r from-cyan-500 to-cyan-400'
-                      }`}
-                      initial={{ width: 0 }}
-                      animate={{ width: `${Math.abs(progress)}%` }}
-                      transition={{ duration: 1, ease: 'easeOut' }}
-                    />
-                  </div>
+              {/* Progress bar */}
+              <div className="relative h-2 bg-zinc-800 rounded-full overflow-hidden mb-3">
+                <motion.div
+                  className={`absolute inset-y-0 left-0 rounded-full ${
+                    isComplete   ? 'bg-emerald-500' :
+                    realized < 0 ? 'bg-red-500/60' :
+                                   'bg-gradient-to-r from-cyan-500 to-cyan-400'
+                  }`}
+                  initial={{ width: 0 }}
+                  animate={{ width: `${Math.abs(progress)}%` }}
+                  transition={{ duration: 1, ease: 'easeOut' }}
+                />
+              </div>
 
-                  {/* Stats row */}
-                  <div className="flex items-center justify-between text-[10px] text-zinc-500 font-mono">
-                    <span>
-                      <span className="text-cyan-400">{activeCount}</span> active /
-                      <span className="text-zinc-400"> {completedCount}</span> closed
-                    </span>
-                    <span>${(c.availableCapital ?? 0).toFixed(0)} free</span>
-                    <span className={msLeft > 0 && msLeft <= 6 * 3_600_000 ? 'text-amber-400' : 'text-zinc-500'}>
-                      ⏳ {deadlineStr}
-                    </span>
+              {/* Stats row */}
+              <div className="flex items-center justify-between text-[10px] text-zinc-500 font-mono">
+                <span>
+                  <span className="text-cyan-400">{activeCount}</span> active /
+                  <span className="text-zinc-400"> {completedCount}</span> closed
+                </span>
+                <span>${(c.availableCapital ?? 0).toFixed(0)} free</span>
+                <span className={msLeft > 0 && msLeft <= 6 * 3_600_000 ? 'text-amber-400' : 'text-zinc-500'}>
+                  ⏳ {deadlineStr}
+                </span>
+              </div>
+            </motion.div>
+          );
+        };
+
+        return (
+          <div style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4 text-cyan-400" />
+                <span className="text-sm font-semibold text-zinc-300 tracking-wide">ACTIVE CAMPAIGNS</span>
+                <span className="text-[10px] text-zinc-600">
+                  ({activeList.length} running{hiddenList.length > 0 ? `, ${hiddenList.length} hidden` : ''})
+                </span>
+              </div>
+            </div>
+
+            {activeList.length > 0 ? (
+              <div className="space-y-3">
+                {activeList.slice(0, 5).map(renderCampaign)}
+              </div>
+            ) : (
+              <div className="text-center py-4 bg-zinc-900/40 border border-zinc-800/50 rounded-xl">
+                <p className="text-zinc-600 text-xs">No active campaigns. Start one via voice: <span className="text-zinc-400">"Hey Jarvis, make me $200 from $5000 by tomorrow."</span></p>
+              </div>
+            )}
+
+            {hiddenList.length > 0 && (
+              <div className="mt-3">
+                <button
+                  onClick={() => setShowHiddenCampaigns(v => !v)}
+                  className="w-full py-2 text-[11px] text-zinc-500 hover:text-zinc-300 border border-dashed border-zinc-800 hover:border-zinc-700 rounded-lg transition-colors"
+                >
+                  {showHiddenCampaigns ? '▲ Hide' : '▼ Show'} {hiddenList.length} paused / completed / cancelled
+                </button>
+                {showHiddenCampaigns && (
+                  <div className="space-y-3 mt-3">
+                    {hiddenList.slice(0, 10).map(renderCampaign)}
                   </div>
-                </motion.div>
-              );
-            })}
+                )}
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Market Intelligence Widget */}
       <div style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>

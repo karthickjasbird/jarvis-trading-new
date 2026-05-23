@@ -1460,6 +1460,21 @@ async function startServer() {
     }
   });
 
+  // Cancel a campaign — closes all open positions belonging to it and
+  // marks status='cancelled'. Frees the capital that pause leaves locked.
+  app.post("/api/campaigns/:campaignId/cancel", async (req, res) => {
+    try {
+      const summary = await goalExecutor.cancelCampaign(req.params.campaignId);
+      res.json({
+        status: "success",
+        message: `Cancelled — ${summary.closed} position${summary.closed === 1 ? '' : 's'} closed${summary.failed ? `, ${summary.failed} failed` : ''}`,
+        ...summary,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- USER SECRETS ROUTES ---
   app.get("/api/secrets/:userId", async (req, res) => {
     try {

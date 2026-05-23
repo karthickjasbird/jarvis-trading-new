@@ -51,7 +51,7 @@ export interface Campaign {
   availableCapital: number;   // Current uninvested capital
   realizedProfit: number;     // Profit from closed trades
   unrealizedProfit: number;   // Profit from open trades (updated on each tick)
-  status: 'active' | 'paused' | 'completed' | 'expired' | 'failed';
+  status: 'active' | 'paused' | 'completed' | 'expired' | 'failed' | 'cancelled';
   isPractice: boolean;
   maxSlots: number;           // Max simultaneous trades (default: 3)
   activeTradeIds: string[];   // Currently open trade IDs
@@ -713,6 +713,61 @@ export class GoalExecutor {
     this.activeCampaigns.set(campaignId, campaign);
     await this.scanAndDeploy(campaign);
     console.log(`[CAMPAIGN ${campaignId}] ▶️ Resumed`);
+  }
+
+  /**
+   * Cancel a campaign — force-closes every open position attached to it
+   * and marks the campaign as 'cancelled'. Unlike pause (which only stops
+   * new deployment), cancel actually frees the capital by closing positions
+   * through the executor (which respects Practice vs Live routing).
+   *
+   * Returns a summary with per-trade close results so the caller can
+   * report success/failure to the UI.
+   */
+  async cancelCampaign(campaignId: string): Promise<{ closed: number; failed: number; pnlReleased: number; errors: string[] }> {
+    const campaign = await this.getCampaign(campaignId);
+    if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
+    if (campaign.status === 'cancelled' || campaign.status === 'completed' || campaign.status === 'expired') {
+      // Idempotent for already-terminal campaigns — nothing to close.
+      return { closed: 0, failed: 0, pnlReleased: 0, errors: [] };
+    }
+
+    const tradeIds = [...(campaign.activeTradeIds || [])];
+    let closed = 0;
+    let failed = 0;
+    let pnlReleased = 0;
+    const errors: string[] = [];
+
+    for (const tradeId of tradeIds) {
+      try {
+        const result = await this.tradeExecutor.closePosition(campaign.userId, tradeId);
+        closed += 1;
+        pnlReleased += Number(result?.realizedPnl ?? 0);
+      } catch (err: any) {
+        failed += 1;
+        const msg = `${tradeId}: ${err?.message || 'unknown error'}`;
+        errors.push(msg);
+        console.error(`[CAMPAIGN ${campaignId}] Failed to close ${tradeId} during cancel:`, err?.message);
+      }
+    }
+
+    // Reload campaign — tradeExecutor.closePosition already updated each
+    // trade doc + portfolio balance via onTradeClosed pathway. Refresh
+    // local state before persisting the cancelled marker.
+    const refreshed = await this.getCampaign(campaignId);
+    const finalCampaign = refreshed || campaign;
+    finalCampaign.status = 'cancelled';
+    finalCampaign.updatedAt = new Date().toISOString();
+    (finalCampaign as any).cancelledAt = new Date().toISOString();
+    await this.saveCampaign(finalCampaign);
+    this.activeCampaigns.delete(campaignId);
+
+    await this.logBrainActivity(campaign.userId,
+      `🛑 CAMPAIGN CANCELLED: ${closed} position${closed === 1 ? '' : 's'} closed, $${pnlReleased.toFixed(2)} P&L realized${failed ? `, ${failed} close failure(s)` : ''}`
+    );
+
+    console.log(`[CAMPAIGN ${campaignId}] 🛑 Cancelled — closed ${closed}/${tradeIds.length} positions (failed ${failed})`);
+    return { closed, failed, pnlReleased, errors };
   }
 
   /**

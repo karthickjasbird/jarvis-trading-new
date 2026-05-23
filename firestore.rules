@@ -50,6 +50,12 @@ service cloud.firestore {
       allow create: if request.auth != null;
     }
 
+    // Campaigns (Phase 8.5 autonomous multi-trade campaigns) — only owner
+    match /campaigns/{docId} {
+      allow read, write: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create: if request.auth != null;
+    }
+
     // Brain activity — read-only for authenticated users (server writes only)
     match /brainActivity/{docId} {
       allow read: if request.auth != null;
