@@ -109,15 +109,16 @@ export class TradeExecutor {
     return doc.data();
   }
 
-  private async checkRiskManagement(userId: string, quantity: number, price: number) {
+  private async checkRiskManagement(userId: string, quantity: number, price: number, isPractice: boolean = true) {
     // Fetch global risk settings
-    let riskConfig = {
+    let riskConfig: any = {
       maxDailyLoss: 1000,
       maxPositionSizePct: 20,
       autoLiquidateThreshold: 500,
-      maxOpenPositions: 5
+      maxOpenPositions: 5,
+      maxLiveCapital: 50, // Default $50 hard cap on aggregate LIVE exposure
     };
-    
+
     const riskDoc = await this.db.collection('riskSettings').doc(userId).get();
     if (riskDoc.exists) {
       riskConfig = { ...riskConfig, ...riskDoc.data() };
@@ -133,7 +134,7 @@ export class TradeExecutor {
     const portfolio = await this.getOrCreatePortfolio(userId);
     const tradeValue = quantity * price;
     const maxTradeValue = (portfolio?.paperBalance || 100000) * (riskConfig.maxPositionSizePct / 100);
-    
+
     if (tradeValue > maxTradeValue) {
       throw new Error(`RISK LIMIT EXCEEDED: Trade value ($${tradeValue.toFixed(2)}) exceeds ${riskConfig.maxPositionSizePct}% of portfolio ($${maxTradeValue.toFixed(2)}).`);
     }
@@ -146,6 +147,36 @@ export class TradeExecutor {
         .get();
       if (openSnap.size >= riskConfig.maxOpenPositions) {
         throw new Error(`RISK LIMIT EXCEEDED: Already at max open positions (${openSnap.size}/${riskConfig.maxOpenPositions}).`);
+      }
+    }
+
+    // 4. LIVE-MONEY HARD CAP (independent of any per-trade % limit).
+    // Sums the notional of every currently-open LIVE position + this
+    // proposed trade's notional. Refuses if aggregate would breach
+    // `maxLiveCapital`. Skipped entirely in Practice mode.
+    if (!isPractice && (riskConfig.maxLiveCapital ?? 0) > 0) {
+      let openLiveExposure = 0;
+      try {
+        const liveSnap = await this.db.collection('trades')
+          .where('userId', '==', userId)
+          .where('status', '==', 'open')
+          .where('isPractice', '==', false)
+          .get();
+        for (const doc of liveSnap.docs) {
+          const t: any = doc.data();
+          // Prefer live mark price if we have it; fall back to entry. Either
+          // way the aggregate is computed conservatively — entry is a known
+          // floor, mark price would be more accurate but is best-effort.
+          const px = this.marketState?.[t.symbol]?.price || t.entryPrice || 0;
+          openLiveExposure += (Number(t.quantity) || 0) * Number(px || 0);
+        }
+      } catch (err: any) {
+        // If we can't read live exposure, REFUSE — fail-closed on live money.
+        throw new Error(`RISK LIMIT CHECK FAILED: Could not verify live exposure (${err.message}). Refusing live trade for safety.`);
+      }
+      const projected = openLiveExposure + tradeValue;
+      if (projected > riskConfig.maxLiveCapital) {
+        throw new Error(`LIVE CAP EXCEEDED: Open live exposure $${openLiveExposure.toFixed(2)} + this trade $${tradeValue.toFixed(2)} = $${projected.toFixed(2)} would breach the $${riskConfig.maxLiveCapital} live cap. Increase Max Live Capital in Risk Manager or close existing live positions.`);
       }
     }
   }
@@ -185,8 +216,8 @@ export class TradeExecutor {
       }
     }
 
-    // Apply Risk Management Guardrails
-    await this.checkRiskManagement(userId, Number(quantity), price);
+    // Apply Risk Management Guardrails (incl. live-money hard cap)
+    await this.checkRiskManagement(userId, Number(quantity), price, isPractice !== false);
 
     let fillPrice = price;
     let orderId = `paper-order-${Date.now()}`;

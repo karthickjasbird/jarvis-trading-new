@@ -142,10 +142,25 @@ async function startServer() {
   });
 
   // ─── VERSION & UPDATE CHECK ────────────────────────────
+  //
+  // Strict semver "is remote newer?" compare. Returns true only when remote
+  // is greater than local; if local is ahead (dev branch, unreleased work)
+  // or equal, the banner stays silent. Falsy/malformed versions degrade to
+  // string inequality.
+  const isRemoteNewer = (remote?: string, local?: string): boolean => {
+    if (!remote || !local) return false;
+    const parse = (v: string) => v.replace(/^v/, '').split('.').map(p => parseInt(p, 10) || 0);
+    const [rMaj, rMin, rPatch] = parse(remote);
+    const [lMaj, lMin, lPatch] = parse(local);
+    if (rMaj !== lMaj) return rMaj > lMaj;
+    if (rMin !== lMin) return rMin > lMin;
+    return rPatch > lPatch;
+  };
+
   app.get("/api/version", async (req, res) => {
     try {
       const versionFile = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'version.json'), 'utf-8'));
-      
+
       // Try to fetch latest version from GitHub (non-blocking, cached)
       let remoteVersion = null;
       let updateAvailable = false;
@@ -158,7 +173,7 @@ async function startServer() {
         );
         if (ghRes.ok) {
           remoteVersion = await ghRes.json();
-          updateAvailable = remoteVersion.version !== versionFile.version;
+          updateAvailable = isRemoteNewer(remoteVersion.version, versionFile.version);
         }
       } catch {
         // GitHub unreachable or timeout — silently ignore
@@ -380,6 +395,12 @@ async function startServer() {
   const positionMonitor = new PositionMonitor(db, strategyTracker, marketState, memoryManager, OWNER_USER_ID);
   setInterval(() => positionMonitor.monitor(), 60 * 1000); // Check stale trades every 60s
   setInterval(() => goalExecutor.monitor(), 60 * 1000); // Check campaign progress every 60s
+
+  // Auto-expire stale pending approvals (time + price-drift). Cadence is
+  // 30s so a 5-min TTL has tight resolution without becoming chatty.
+  const { ApprovalExpiry } = await import('./engine/approvalExpiry.ts');
+  const approvalExpiry = new ApprovalExpiry(db, marketState, OWNER_USER_ID);
+  setInterval(() => approvalExpiry.sweep(), 30 * 1000);
 
   // Autonomous scan-and-trigger loop
   let autonomousEnabled = true; // Toggle via /api/autonomous/toggle

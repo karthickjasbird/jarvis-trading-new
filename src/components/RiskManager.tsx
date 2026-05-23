@@ -14,6 +14,9 @@ interface RiskSettings {
   maxOpenPositions: number;
   capitalPerTrade: number;
   profitTarget: number;
+  approvalTtlMinutes: number;
+  approvalMaxDriftPercent: number;
+  maxLiveCapital: number;
 }
 
 interface DashboardData {
@@ -54,6 +57,9 @@ export function RiskManager({ userId }: { userId: string }) {
     maxOpenPositions: 5,
     capitalPerTrade: 8000,
     profitTarget: 50,
+    approvalTtlMinutes: 5,
+    approvalMaxDriftPercent: 0.5,
+    maxLiveCapital: 50,
   });
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [audit, setAudit] = useState<string | null>(null);
@@ -493,6 +499,69 @@ export function RiskManager({ userId }: { userId: string }) {
                         className="w-full bg-zinc-950 border border-emerald-500/20 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500/50"
                       />
                       <p className="text-[9px] text-zinc-600 mt-1">Exit when profit hits this $ amount.</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ─── Live Money Cap Section ─── */}
+                <div className="border-t border-red-500/30 pt-4 mt-1">
+                  <div className="flex items-center gap-2 mb-3">
+                    <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
+                    <span className="text-[10px] font-semibold text-red-400 uppercase tracking-wider">Live Money Cap</span>
+                    <span className="text-[9px] text-zinc-600">(hard ceiling on total LIVE exposure — ignored in Practice)</span>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                      Max Live Capital ($)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={settings.maxLiveCapital}
+                      onChange={e => setSettings({ ...settings, maxLiveCapital: Number(e.target.value) })}
+                      className="w-full bg-zinc-950 border border-red-500/40 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-red-500/50"
+                    />
+                    <p className="text-[9px] text-zinc-600 mt-1">Sum of all open live positions + this trade's notional must stay under this. Refuses orders that would breach it.</p>
+                  </div>
+                </div>
+
+                {/* ─── Approval Queue Section ─── */}
+                <div className="border-t border-zinc-700/50 pt-4 mt-1">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="text-[10px] font-semibold text-cyan-400 uppercase tracking-wider">Approval Queue</span>
+                    <span className="text-[9px] text-zinc-600">(auto-expires stale pending trades)</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                        Approval TTL (minutes)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={1440}
+                        step={1}
+                        value={settings.approvalTtlMinutes}
+                        onChange={e => setSettings({ ...settings, approvalTtlMinutes: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-cyan-500/20 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+                      />
+                      <p className="text-[9px] text-zinc-600 mt-1">Auto-decline approvals older than this.</p>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                        Max Price Drift (%)
+                      </label>
+                      <input
+                        type="number"
+                        min={0.1}
+                        max={20}
+                        step={0.1}
+                        value={settings.approvalMaxDriftPercent}
+                        onChange={e => setSettings({ ...settings, approvalMaxDriftPercent: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-cyan-500/20 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+                      />
+                      <p className="text-[9px] text-zinc-600 mt-1">Auto-decline if price moves past this since the proposal.</p>
                     </div>
                   </div>
                 </div>
