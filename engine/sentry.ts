@@ -31,6 +31,7 @@ export class SentryEngine {
   private cacheRefreshInterval: number = 10000; // Refresh from Firestore every 10 seconds
   private processingTrades: Set<string> = new Set(); // Prevent double-processing
   private cachedAutoLiquidateThreshold: number = 0; // From risk settings — 0 means disabled
+  private cachedProfitTarget: number = 0; // From risk settings — 0 means disabled
 
   constructor(db: any, tradeExecutor: TradeExecutor, marketState: any, memoryManager: MemoryManager, ownerId?: string) {
     this.db = db;
@@ -149,14 +150,18 @@ export class SentryEngine {
         }));
         this.lastCacheRefresh = now;
 
-        // Also refresh auto-liquidate threshold from risk settings
         try {
           const riskUserId = this.ownerId || this.openTradesCache[0]?.userId;
           if (riskUserId) {
             const riskDoc = await this.db.collection('riskSettings').doc(riskUserId).get();
-            this.cachedAutoLiquidateThreshold = riskDoc.exists
-              ? (riskDoc.data()?.autoLiquidateThreshold || 0)
-              : 300; // default $300
+            if (riskDoc.exists) {
+              const rData = riskDoc.data();
+              this.cachedAutoLiquidateThreshold = rData?.autoLiquidateThreshold || 0;
+              this.cachedProfitTarget = rData?.profitTarget || 0;
+            } else {
+              this.cachedAutoLiquidateThreshold = 300; // default $300
+              this.cachedProfitTarget = 0;
+            }
           }
         } catch {}
       } catch {
@@ -203,10 +208,11 @@ export class SentryEngine {
       }
 
       // Check Dollar Profit Target
-      if (!shouldClose && trade.profitTarget) {
-        if (pnl >= trade.profitTarget) {
+      const effectiveProfitTarget = trade.profitTarget || this.cachedProfitTarget;
+      if (!shouldClose && effectiveProfitTarget) {
+        if (pnl >= effectiveProfitTarget) {
           shouldClose = true;
-          reason = `⚡ INSTANT PROFIT TARGET $${trade.profitTarget} reached (PnL: $${pnl.toFixed(2)})`;
+          reason = `⚡ INSTANT PROFIT TARGET $${effectiveProfitTarget} reached (PnL: $${pnl.toFixed(2)})`;
         }
       }
 
@@ -545,14 +551,15 @@ export class SentryEngine {
         }
 
         // Check Dollar Profit Target
-        if (!shouldClose && trade.profitTarget) {
+        const effectiveProfitTarget = trade.profitTarget || this.cachedProfitTarget;
+        if (!shouldClose && effectiveProfitTarget) {
           const isLong = trade.side === 'buy';
           const priceDiff = currentPrice - trade.entryPrice;
           const pnl = isLong ? (priceDiff * trade.quantity) : (-priceDiff * trade.quantity);
-          if (pnl >= trade.profitTarget) {
+          if (pnl >= effectiveProfitTarget) {
             shouldClose = true;
-            reason = `Profit Target $${trade.profitTarget} reached (P&L: $${pnl.toFixed(2)})`;
-            console.log(`[SENTRY] 💰 PROFIT TARGET HIT: ${trade.symbol} PNL $${pnl.toFixed(2)} >= target $${trade.profitTarget}`);
+            reason = `Profit Target $${effectiveProfitTarget} reached (P&L: $${pnl.toFixed(2)})`;
+            console.log(`[SENTRY] 💰 PROFIT TARGET HIT: ${trade.symbol} PNL $${pnl.toFixed(2)} >= target $${effectiveProfitTarget}`);
           }
         }
 

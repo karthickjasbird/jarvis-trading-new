@@ -43,7 +43,7 @@ export class CorrelationGuard {
    * Check if a new trade is allowed based on existing open positions
    * Returns { allowed: boolean, reason: string, existingTrade?: any }
    */
-  async checkTradeAllowed(symbol: string, side: 'buy' | 'sell'): Promise<{
+  async checkTradeAllowed(symbol: string, side: 'buy' | 'sell', userId?: string): Promise<{
     allowed: boolean;
     reason: string;
     group?: string;
@@ -57,10 +57,15 @@ export class CorrelationGuard {
     }
 
     try {
-      // Fetch all open trades
-      const openTradesSnapshot = await this.db.collection('trades')
-        .where('status', '==', 'open')
-        .get();
+      // Fetch open trades for THIS user only
+      let q = this.db.collection('trades')
+        .where('status', '==', 'open');
+      
+      if (userId) {
+        q = q.where('userId', '==', userId);
+      }
+      
+      const openTradesSnapshot = await q.get();
 
       for (const doc of openTradesSnapshot.docs) {
         const trade = doc.data();

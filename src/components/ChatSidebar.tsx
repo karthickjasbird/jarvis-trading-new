@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, MouseEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export interface ChatSession {
@@ -73,7 +73,7 @@ export default function ChatSidebar({ isOpen, onClose, userId, currentSessionId,
       .catch(console.error);
   }, [currentSessionId, userId]);
 
-  const handleDelete = async (sessionId: string, e: React.MouseEvent) => {
+  const handleDelete = async (sessionId: string, e: MouseEvent) => {
     e.stopPropagation();
     if (!confirm('Delete this chat?')) return;
     try {
@@ -99,7 +99,7 @@ export default function ChatSidebar({ isOpen, onClose, userId, currentSessionId,
     setEditingId(null);
   };
 
-  const startEdit = (session: ChatSession, e: React.MouseEvent) => {
+  const startEdit = (session: ChatSession, e: MouseEvent) => {
     e.stopPropagation();
     setEditingId(session.id);
     setEditTitle(session.title);

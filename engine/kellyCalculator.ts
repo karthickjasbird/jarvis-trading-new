@@ -73,22 +73,29 @@ export class KellyCalculator {
       return cached.report;
     }
 
-    // Fetch closed trades
+    // Fetch closed trades (no orderBy/limit in query to avoid requiring composite indexes)
     const snapshot = await this.db.collection('trades')
       .where('userId', '==', userId)
       .where('status', '==', 'closed')
-      .orderBy('closedAt', 'desc')
-      .limit(tradeLimit)
       .get();
 
     const trades = snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() }));
 
+    // Sort in-memory by closedAt descending
+    trades.sort((a: any, b: any) => {
+      const aTime = a.closedAt ? (a.closedAt.toDate ? a.closedAt.toDate().getTime() : new Date(a.closedAt).getTime()) : 0;
+      const bTime = b.closedAt ? (b.closedAt.toDate ? b.closedAt.toDate().getTime() : new Date(b.closedAt).getTime()) : 0;
+      return bTime - aTime;
+    });
+
+    const limitedTrades = trades.slice(0, tradeLimit);
+
     // Calculate overall Kelly
-    const overall = this.calculateKelly(trades);
+    const overall = this.calculateKelly(limitedTrades);
 
     // Calculate per-symbol Kelly
     const symbolMap = new Map<string, any[]>();
-    for (const trade of trades) {
+    for (const trade of limitedTrades) {
       const sym = trade.symbol || 'UNKNOWN';
       if (!symbolMap.has(sym)) symbolMap.set(sym, []);
       symbolMap.get(sym)!.push(trade);
@@ -112,7 +119,7 @@ export class KellyCalculator {
       overall,
       bySymbol,
       generatedAt: new Date().toISOString(),
-      dataWindow: `Last ${trades.length} trades`,
+      dataWindow: `Last ${limitedTrades.length} trades`,
     };
 
     this.cache.set(userId, { report, cachedAt: Date.now() });

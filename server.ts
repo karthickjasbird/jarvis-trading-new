@@ -21,6 +21,10 @@ import { MarketScanner } from "./engine/marketScanner.ts";
 import { StrategyTracker } from "./engine/strategyTracker.ts";
 import { ConfidenceEngine } from "./engine/confidenceEngine.ts";
 import { PostMortemEngine } from "./engine/postMortem.ts";
+import { TradeDiaryEngine } from "./engine/tradeDiary.ts";
+import { getTradingViewBridge } from "./engine/tradingViewBridge.ts";
+import { readTVIndicators } from "./engine/tvIndicators.ts";
+import { analyzeChart, analyzeChartMultiTimeframe } from "./engine/tvVision.ts";
 import { BinancePriceFeed } from "./engine/binancePriceFeed.ts";
 import { UserSecretsManager } from "./engine/userSecrets.ts";
 import { RSI, MACD, EMA } from "technicalindicators";
@@ -302,18 +306,24 @@ async function startServer() {
   const memoryManager = new MemoryManager(db);
   const userSecrets = new UserSecretsManager(db);
   const sentryEngine = new SentryEngine(db, tradeExecutor, marketState, memoryManager, OWNER_USER_ID);
-  const scraper = new MarketScraper(memoryManager);
+  const scraper = new MarketScraper(memoryManager, db);
   const webAgent = new WebAgent(memoryManager);
   const goalPlanner = new GoalPlanner(db);
   const strategyTracker = new StrategyTracker(db);
-  const agentSwarm = new AgentSwarm(db, marketState, strategyTracker, OWNER_USER_ID);
-  const marketScanner = new MarketScanner(db);
-  const goalExecutor = new GoalExecutor(db, tradeExecutor, marketScanner, marketState, OWNER_USER_ID);
   const regimeDetector = new RegimeDetector();
   const kellyCalculator = new KellyCalculator(db);
+  const tradeDiary = new TradeDiaryEngine(db);
+  const agentSwarm = new AgentSwarm(db, marketState, strategyTracker, OWNER_USER_ID, regimeDetector, kellyCalculator, memoryManager, tradeDiary);
+  const marketScanner = new MarketScanner(db);
+  const goalExecutor = new GoalExecutor(db, tradeExecutor, marketScanner, marketState, OWNER_USER_ID);
   sentryEngine.setGoalExecutor(goalExecutor);
   const confidenceEngine = new ConfidenceEngine(db);
-  const postMortemEngine = new PostMortemEngine(db, memoryManager);
+  const postMortemEngine = new PostMortemEngine(db, memoryManager, tradeDiary);
+
+  // --- TRADINGVIEW BRIDGE (NEXUS Phase 4) ---
+  // Lazy: doesn't attach until POST /api/tradingview/connect — so server boot
+  // never depends on Chrome being open.
+  const tvBridge = getTradingViewBridge(process.env.CHROME_DEBUG_URL);
 
   // --- EVENT-DRIVEN SENTRY: React to every price tick from WebSocket ---
   priceFeed.on('price_update', ({ symbol, rawSymbol, price }) => {
@@ -428,9 +438,9 @@ async function startServer() {
           await broadcastTelegram(db, formatAutoTrigger(qualifiedOpps.map((o: any) => ({ symbol: o.symbol, score: o.score }))));
         } catch {}
 
-        // Fire the Agent Swarm (use OWNER_USER_ID so trades are attributed to the local user)
+        // Fire the Agent Swarm with APPROVAL REQUIRED — user must approve trades
         const swarmUserId = OWNER_USER_ID || 'autonomous-system';
-        const result = await agentSwarm.runPipeline(swarmUserId, true);
+        const result = await agentSwarm.runPipeline(swarmUserId, true, undefined, true); // requireApproval=true
         console.log(`[AUTONOMOUS] Swarm result: ${result.reason}`);
       } else {
         console.log(`[AUTONOMOUS] No pairs qualified (need score ≥ 75 + bullish confluence + macro aligned). Waiting for next scan.`);
@@ -962,6 +972,149 @@ async function startServer() {
     res.json({ enabled: autonomousEnabled });
   });
 
+  // --- TRADINGVIEW BRIDGE ROUTES (NEXUS Phase 4) ---
+
+  app.get("/api/tradingview/status", async (_req, res) => {
+    try {
+      res.json(await tvBridge.healthCheck());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/tradingview/connect", async (_req, res) => {
+    try {
+      await tvBridge.connect();
+      res.json(await tvBridge.healthCheck());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/tradingview/disconnect", async (_req, res) => {
+    try {
+      await tvBridge.disconnect();
+      res.json({ disconnected: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/tradingview/symbol", async (req, res) => {
+    try {
+      const { symbol, exchange } = req.body ?? {};
+      if (!symbol) return res.status(400).json({ error: "symbol required (e.g. 'BTC/USDT')" });
+      await tvBridge.setSymbol(symbol, exchange ?? "BINANCE");
+      res.json({ ok: true, symbol, exchange: exchange ?? "BINANCE" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/tradingview/timeframe", async (req, res) => {
+    try {
+      const { tf } = req.body ?? {};
+      if (!tf) return res.status(400).json({ error: "tf required (e.g. '1h', '4h', '1d')" });
+      await tvBridge.setTimeframe(tf);
+      res.json({ ok: true, tf });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/tradingview/screenshot", async (req, res) => {
+    try {
+      const chartOnly = req.query.chartOnly === "1" || req.query.chartOnly === "true";
+      const buffer = await tvBridge.screenshot({ chartOnly, type: "png" });
+      res.set("Content-Type", "image/png");
+      res.send(buffer);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Phase 5: read indicator values from the chart legend ---
+
+  app.get("/api/tradingview/legend", async (_req, res) => {
+    try {
+      const items = await tvBridge.getChartLegend();
+      res.json({ count: items.length, items });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/tradingview/indicator", async (req, res) => {
+    try {
+      const name = String(req.query.name ?? "");
+      if (!name) return res.status(400).json({ error: "name query param required (e.g. ?name=RSI)" });
+      const item = await tvBridge.getIndicatorValue(name);
+      if (!item) return res.status(404).json({ error: `Indicator '${name}' not found in chart legend. Add it to your TV chart first.` });
+      res.json(item);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Phase 5b — return parsed/typed indicator values (RSI, Ichimoku, Supertrend, Volume)
+  app.get("/api/tradingview/indicators", async (_req, res) => {
+    try {
+      res.json(await readTVIndicators(tvBridge));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Phase 6 — Gemini Vision analysis of the current TradingView chart
+  app.get("/api/tradingview/vision", async (req, res) => {
+    try {
+      const symbol = req.query.symbol ? String(req.query.symbol) : undefined;
+      const timeframe = req.query.timeframe ? String(req.query.timeframe) : undefined;
+      const chartOnly = req.query.chartOnly !== "0" && req.query.chartOnly !== "false";
+      res.json(await analyzeChart(tvBridge, { symbol, timeframe, chartOnly }));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Phase 6 — Multi-timeframe vision analysis (cycles the chart through TFs)
+  app.post("/api/tradingview/vision/multi", async (req, res) => {
+    try {
+      const { symbol, timeframes, chartOnly } = req.body ?? {};
+      if (!Array.isArray(timeframes) || timeframes.length === 0) {
+        return res.status(400).json({ error: "timeframes array required (e.g. ['1h','4h','1d'])" });
+      }
+      res.json(await analyzeChartMultiTimeframe(tvBridge, timeframes, { symbol, chartOnly }));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Temporary diagnostic for tuning legend selectors against the live TV DOM.
+  app.get("/api/tradingview/_debug-legend", async (_req, res) => {
+    try {
+      res.json(await tvBridge._debugLegend());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/tradingview/_debug-legend-children", async (_req, res) => {
+    try {
+      res.json(await tvBridge._debugLegendChildren());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/tradingview/_debug-geometry", async (_req, res) => {
+    try {
+      res.json(await tvBridge._debugChartGeometry());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // --- STRATEGY TRACKER ROUTES ---
 
   // Get all strategy stats
@@ -1064,6 +1217,25 @@ async function startServer() {
     }
   });
 
+  // --- MARKET SENTIMENT ROUTES ---
+
+  // Get latest sentiment analysis
+  app.get("/api/sentiment", async (_req, res) => {
+    try {
+      // Try in-memory cache first
+      const cached = scraper.getLastResult();
+      if (cached) return res.json(cached);
+
+      // Fallback: read from Firestore
+      const doc = await db.collection('marketSentiment').doc('latest').get();
+      if (doc.exists) return res.json(doc.data());
+
+      res.json({ sentimentScore: 50, classification: 'neutral', narrative: 'Sentiment pipeline has not run yet.', drivers: [], sources: [], headlineCount: 0, timestamp: new Date().toISOString() });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- MARKET REGIME DETECTION ROUTES ---
 
   // Get regime for a specific symbol
@@ -1097,7 +1269,7 @@ async function startServer() {
     const { userId, isPractice, targetSymbol } = req.body;
     if (!userId) return res.status(400).json({ error: "userId is required" });
     try {
-      const result = await agentSwarm.runPipeline(userId, isPractice ?? true, targetSymbol);
+      const result = await agentSwarm.runPipeline(userId, isPractice ?? true, targetSymbol, true); // ALWAYS require approval
       res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1571,6 +1743,8 @@ async function startServer() {
             maxPositionSizePct: 10,
             autoLiquidateThreshold: 300,
             maxOpenPositions: 5,
+            capitalPerTrade: 8000,
+            profitTarget: 50,
           }
         });
       }
@@ -1579,7 +1753,7 @@ async function startServer() {
       if (!serviceAccount && error.message?.includes('default credentials')) {
         return res.json({
           status: "success",
-          settings: { maxDailyLoss: 1000, maxPositionSizePct: 10, autoLiquidateThreshold: 300, maxOpenPositions: 5 }
+          settings: { maxDailyLoss: 1000, maxPositionSizePct: 10, autoLiquidateThreshold: 300, maxOpenPositions: 5, capitalPerTrade: 8000, profitTarget: 50 }
         });
       }
       res.status(500).json({ error: error.message });
@@ -1826,17 +2000,41 @@ Be specific. Reference the actual numbers.`;
       if (pendingTrade.userId !== userId) return res.status(403).json({ error: "Unauthorized" });
       if (pendingTrade.status !== 'pending') return res.status(400).json({ error: "Trade is not pending" });
 
+      // Cap quantity using user's capitalPerTrade setting
+      let safeQuantity = pendingTrade.quantity;
+      try {
+        // Read user's trade parameters
+        const riskDoc = await db.collection('riskSettings').doc(userId).get();
+        const capitalPerTrade = riskDoc.exists ? (riskDoc.data()?.capitalPerTrade || 8000) : 8000;
+        
+        // Get current price for accurate notional calc
+        let currentPrice = pendingTrade.entryPrice || 1;
+        try {
+          const cleanSym = (pendingTrade.symbol || '').replace('/', '');
+          const priceRes = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cleanSym}`);
+          const priceData = await priceRes.json() as any;
+          if (priceData.price) currentPrice = parseFloat(priceData.price);
+        } catch {}
+
+        const notional = safeQuantity * currentPrice;
+        if (notional > capitalPerTrade) {
+          safeQuantity = parseFloat((capitalPerTrade / currentPrice).toFixed(4));
+          log(`[TRADE] Capped quantity from ${pendingTrade.quantity} to ${safeQuantity} (user capital: $${capitalPerTrade})`);
+        }
+      } catch {}
+
       // Execute actual trade
       const result = await tradeExecutor.execute({
         userId,
         symbol: pendingTrade.symbol,
         side: pendingTrade.side,
-        quantity: pendingTrade.quantity,
+        quantity: safeQuantity,
         market: pendingTrade.market || 'crypto',
         mode: 'autonomous',
         isPractice: true, // Hard-locked safety net
         stopLossPrice: pendingTrade.stopLossPrice,
         takeProfitPrice: pendingTrade.takeProfitPrice,
+        profitTarget: pendingTrade.profitTarget || null,
       });
 
       // Mark old pending as resolved/deleted
@@ -1846,6 +2044,45 @@ Be specific. Reference the actual numbers.`;
     } catch (error: any) {
       if (!serviceAccount && error.message?.includes('default credentials')) {
         return res.json({ status: "success", mockExecuted: true });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Decline a pending trade
+  app.post("/api/trade/decline", async (req, res) => {
+    const { userId, tradeId } = req.body;
+    if (!userId || !tradeId) return res.status(400).json({ error: "userId and tradeId required" });
+
+    try {
+      const docRef = db.collection('trades').doc(tradeId);
+      const docSnap = await docRef.get();
+      if (!docSnap.exists) return res.status(404).json({ error: "Trade not found" });
+
+      const pendingTrade = docSnap.data()!;
+      if (pendingTrade.userId !== userId) return res.status(403).json({ error: "Unauthorized" });
+      if (pendingTrade.status !== 'pending') return res.status(400).json({ error: "Trade is not pending" });
+
+      // Mark as declined
+      await docRef.update({
+        status: 'declined',
+        declinedAt: new Date().toISOString(),
+      });
+
+      // Log to brain activity
+      await db.collection('brainActivity').add({
+        agent: 'executor',
+        message: `❌ Trade DECLINED by user: ${pendingTrade.side?.toUpperCase()} ${pendingTrade.symbol} @ $${pendingTrade.entryPrice}`,
+        type: 'action',
+        userId,
+        timestamp: new Date().toISOString(),
+      });
+
+      log(`[TRADE] ❌ User declined trade: ${pendingTrade.symbol}`);
+      res.json({ status: "success", message: `Declined ${pendingTrade.symbol} trade` });
+    } catch (error: any) {
+      if (!serviceAccount && error.message?.includes('default credentials')) {
+        return res.json({ status: "success", mockDeclined: true });
       }
       res.status(500).json({ error: error.message });
     }
@@ -1927,7 +2164,7 @@ Be specific. Reference the actual numbers.`;
       // FIRE POST-TRADE AUTOMATIONS
       setImmediate(async () => {
         try {
-          const tradeData = result.trade || {};
+          const tradeData: any = result.trade || {};
           const pnlPercent = tradeData.entryPrice > 0 ? ((result.realizedPnl || 0) / (tradeData.entryPrice * tradeData.quantity)) * 100 : 0;
 
           // 1. PostMortem Analysis — Jarvis learns WHY it won or lost
@@ -2195,12 +2432,13 @@ Your response must start with LONG, SHORT, HOLD, or EXIT.`;
         pnl: trade.pnl,
         closedAt: new Date(trade.timestamp * 1000).toISOString(),
         mode: 'paper',
-        source: 'time-machine-simulation'
+        source: 'time-machine-simulation',
+        userId: userId
       };
 
       // Force PostMortem Engine to analyze the simulated trade
       // This will permanently write the lesson to memory.md via memoryManager
-      await postMortemEngine.analyze(mockTrade as any, userId);
+      await postMortemEngine.analyze(mockTrade as any);
 
       res.json({ status: "success", message: "Lesson analyzed and stored in memory bank." });
     } catch (error: any) {
@@ -2346,6 +2584,36 @@ Your response must start with LONG, SHORT, HOLD, or EXIT.`;
         return res.json({ status: "success", message: "Closed 0 positions (mock)", results: [], totalRealizedPnl: 0 });
       }
       console.error("PANIC CLOSE FAILED:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Clean up orphaned trades (missing isPractice field from old code)
+  app.post("/api/admin/cleanup-orphaned-trades", async (req, res) => {
+    try {
+      const snapshot = await db.collection('trades')
+        .where('status', '==', 'open')
+        .get();
+      
+      let cleaned = 0;
+      for (const doc of snapshot.docs) {
+        const data = doc.data();
+        if (data.isPractice === undefined || data.isPractice === null) {
+          // Old trade missing isPractice — close it as cancelled
+          await doc.ref.update({
+            status: 'closed',
+            isPractice: true,
+            closedAt: new Date().toISOString(),
+            closeReason: 'admin_cleanup_orphaned',
+            pnl: 0,
+          });
+          cleaned++;
+          log(`[CLEANUP] Closed orphaned trade ${doc.id}: ${data.symbol} (missing isPractice field)`);
+        }
+      }
+      
+      res.json({ status: 'success', cleaned, message: `Cleaned ${cleaned} orphaned trade(s)` });
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
@@ -2505,6 +2773,21 @@ Your response must start with LONG, SHORT, HOLD, or EXIT.`;
       }
     });
   }, 2000); // Broadcast every 2 seconds (prices are already live from WebSocket)
+
+  // ─── TRADE DIARY API ────────────────────────────────────────
+  app.get('/api/diary/:userId', async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const limit = parseInt(req.query.limit as string) || 20;
+      const symbol = req.query.symbol as string | undefined;
+
+      const entries = await tradeDiary.getEntries(userId, limit, symbol);
+      res.json({ entries, count: entries.length });
+    } catch (err: any) {
+      console.error('[API] Diary fetch error:', err.message);
+      res.status(500).json({ error: 'Failed to fetch diary entries' });
+    }
+  });
 
   app.get('/api/market-data', async (req, res) => {
     const symbol = req.query.symbol as string;

@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, FormEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   ShieldAlert, Save, AlertTriangle, ShieldCheck, Activity,
   TrendingDown, Crosshair, Flame, Ban, Brain, RefreshCw,
-  ChevronDown, ChevronUp, Eye
+  ChevronDown, ChevronUp, Eye, DollarSign, Target
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -12,6 +12,8 @@ interface RiskSettings {
   maxPositionSizePct: number;
   autoLiquidateThreshold: number;
   maxOpenPositions: number;
+  capitalPerTrade: number;
+  profitTarget: number;
 }
 
 interface DashboardData {
@@ -50,6 +52,8 @@ export function RiskManager({ userId }: { userId: string }) {
     maxPositionSizePct: 10,
     autoLiquidateThreshold: 300,
     maxOpenPositions: 5,
+    capitalPerTrade: 8000,
+    profitTarget: 50,
   });
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [audit, setAudit] = useState<string | null>(null);
@@ -78,7 +82,7 @@ export function RiskManager({ userId }: { userId: string }) {
     return () => clearInterval(interval);
   }, [userId]);
 
-  const handleSave = async (e: React.FormEvent) => {
+  const handleSave = async (e: FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
     try {
@@ -453,6 +457,45 @@ export function RiskManager({ userId }: { userId: string }) {
                     />
                     <p className="text-[9px] text-zinc-600 mt-1">Max simultaneous open trades.</p>
                   </div>
+
+                {/* ─── Trade Parameters Section ─── */}
+                <div className="border-t border-zinc-700/50 pt-4 mt-1">
+                  <div className="flex items-center gap-2 mb-3">
+                    <DollarSign className="w-3.5 h-3.5 text-amber-400" />
+                    <span className="text-[10px] font-semibold text-amber-400 uppercase tracking-wider">Trade Parameters</span>
+                    <span className="text-[9px] text-zinc-600">(used when Jarvis proposes trades)</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                        Capital Per Trade ($)
+                      </label>
+                      <input
+                        type="number"
+                        min={100}
+                        step={1}
+                        value={settings.capitalPerTrade}
+                        onChange={e => setSettings({ ...settings, capitalPerTrade: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-amber-500/20 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                      />
+                      <p className="text-[9px] text-zinc-600 mt-1">How much $ to allocate per trade.</p>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                        Profit Target ($)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={settings.profitTarget}
+                        onChange={e => setSettings({ ...settings, profitTarget: Number(e.target.value) })}
+                        className="w-full bg-zinc-950 border border-emerald-500/20 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500/50"
+                      />
+                      <p className="text-[9px] text-zinc-600 mt-1">Exit when profit hits this $ amount.</p>
+                    </div>
+                  </div>
+                </div>
                 </div>
 
                 <button

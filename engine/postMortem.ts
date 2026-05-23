@@ -13,6 +13,7 @@
 import { generateText } from './modelRouter.ts';
 import { TechnicalAnalysisEngine } from './technicalAnalysis.ts';
 import { MemoryManager } from './memory.ts';
+import { TradeDiaryEngine } from './tradeDiary.ts';
 
 export interface PostMortemReport {
   tradeId: string;
@@ -34,11 +35,13 @@ export class PostMortemEngine {
   private db: any;
   private taEngine: TechnicalAnalysisEngine;
   private memoryManager: MemoryManager | null;
+  private tradeDiary: TradeDiaryEngine | null;
 
-  constructor(db: any, memoryManager?: MemoryManager) {
+  constructor(db: any, memoryManager?: MemoryManager, tradeDiary?: TradeDiaryEngine) {
     this.db = db;
     this.taEngine = new TechnicalAnalysisEngine();
     this.memoryManager = memoryManager || null;
+    this.tradeDiary = tradeDiary || null;
   }
 
   /**
@@ -124,6 +127,24 @@ Be specific. Reference the actual numbers.`;
 
       // Store lessons in Vector Memory Bank for future retrieval
       await this.storeInMemory(report, trade.userId);
+
+      // TRADE DIARY: Update the diary entry with outcome, grade, and lessons
+      if (this.tradeDiary && trade.userId) {
+        try {
+          const outcome = trade.pnl >= 0 ? 'win' as const : 'loss' as const;
+          await this.tradeDiary.updateWithPostMortem(
+            trade.userId,
+            trade.tradeId,
+            outcome,
+            trade.pnl,
+            trade.pnlPercent,
+            report.grade,
+            report.lessons
+          );
+        } catch (diaryErr: any) {
+          console.error('[POST-MORTEM] Diary update failed:', diaryErr.message);
+        }
+      }
 
       // Log to brain activity
       await this.logActivity(report);

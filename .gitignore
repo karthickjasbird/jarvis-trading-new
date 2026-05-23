@@ -9,3 +9,9 @@ coverage/
 .owner_user_id
 serviceAccountKey*.json
 firebaseConfig.ts
+
+# Test/debug artifacts — never commit
+*.png
+*.jpg
+*.jpeg
+scratch/

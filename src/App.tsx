@@ -155,7 +155,7 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const { positions, pendingTrades, tradeHistory, dailyPnl, portfolio, sentryConfig, sentryLogs, closePosition, panicCloseAll, executeTrade, approveTrade, isLoading } = useTrades(user?.uid || '', isPracticeMode);
+  const { positions, pendingTrades, tradeHistory, dailyPnl, portfolio, sentryConfig, sentryLogs, closePosition, panicCloseAll, executeTrade, approveTrade, declineTrade, isLoading } = useTrades(user?.uid || '', isPracticeMode);
   const { news, whaleAlerts } = useMarketIntel();
 
   const handleNavigate = useCallback((destination: string) => {
@@ -1553,10 +1553,12 @@ export default function App() {
         tradeHistory={tradeHistory}
         dailyPnl={dailyPnl}
         portfolio={portfolio}
+        userId={user?.uid || ''}
         sentryConfig={sentryConfig}
         sentryLogs={sentryLogs}
         onClosePosition={closePosition}
         onApproveTrade={approveTrade}
+        onDeclineTrade={declineTrade}
         isLoading={isLoading}
         isPracticeMode={isPracticeMode}
         tradingMode={tradingMode}

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   ChevronUp,
@@ -29,16 +29,18 @@ interface DashboardProps {
   tradeHistory: ClosedTrade[];
   dailyPnl: DailyPnl;
   portfolio: { paperBalance: number; realizedPnl: number; liveBalance?: number; liveRealizedPnl?: number };
+  userId?: string;
   sentryConfig?: { active: boolean, symbol?: string, condition?: string, targetPrice?: number, side?: string, quantity?: number, isAutonomous?: boolean, autonomousPrompt?: string };
   sentryLogs?: SentryLog[];
   onClosePosition: (tradeId: string) => Promise<any>;
   onApproveTrade?: (tradeId: string) => Promise<any>;
+  onDeclineTrade?: (tradeId: string) => Promise<any>;
   isLoading: boolean;
   isPracticeMode?: boolean;
   tradingMode?: 'sentry' | 'copilot';
   showTimeMachine?: boolean;
   isReplaying?: boolean;
-  onStartReplay?: (date: string, speed: number, symbol: string, jarvisEnabled: boolean) => void;
+  onStartReplay?: (date: string, speed: number, symbol: string, jarvisEnabled: boolean, capital: number, profitTarget: number) => void;
   onStopReplay?: () => void;
 }
 
@@ -48,10 +50,12 @@ export function Dashboard({
   tradeHistory,
   dailyPnl,
   portfolio,
+  userId = '',
   sentryConfig,
   sentryLogs = [],
   onClosePosition,
   onApproveTrade,
+  onDeclineTrade,
   isLoading,
   isPracticeMode = true,
   tradingMode = 'copilot',
@@ -64,6 +68,7 @@ export function Dashboard({
   const [activeTab, setActiveTab] = useState<'positions' | 'pending' | 'history' | 'sentry' | 'intel'>('positions');
   const [closingId, setClosingId] = useState<string | null>(null);
   const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [decliningId, setDecliningId] = useState<string | null>(null);
   const { news, whaleAlerts, isLoading: intelLoading } = useMarketIntel();
 
   const handleClosePosition = async (tradeId: string, symbol: string) => {
@@ -94,6 +99,19 @@ export function Dashboard({
       toast.error(err.message || 'Failed to approve trade');
     } finally {
       setApprovingId(null);
+    }
+  };
+
+  const handleDeclineTrade = async (tradeId: string) => {
+    if (!onDeclineTrade) return;
+    setDecliningId(tradeId);
+    try {
+      await onDeclineTrade(tradeId);
+      toast.success('Trade Declined', { style: { backgroundColor: '#ef4444', color: 'white', border: 'none' } });
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to decline trade');
+    } finally {
+      setDecliningId(null);
     }
   };
 
@@ -465,15 +483,44 @@ export function Dashboard({
                                 {trade.side}
                               </span>
                               <span className="text-zinc-100 font-bold">{trade.symbol}</span>
-                              <span className="text-sm font-mono text-zinc-400">Qty: {trade.quantity}</span>
+                              <span className="text-sm font-mono text-zinc-400">Qty: {trade.quantity?.toFixed?.(2) || trade.quantity}</span>
                             </div>
-                            <button 
-                              onClick={() => handleApproveTrade(trade.id)}
-                              disabled={approvingId === trade.id}
-                              className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-bold text-sm rounded transition-colors disabled:opacity-50"
-                            >
-                              {approvingId === trade.id ? 'Approving...' : 'Approve'}
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button 
+                                onClick={() => handleDeclineTrade(trade.id)}
+                                disabled={decliningId === trade.id || approvingId === trade.id}
+                                className="px-4 py-1.5 bg-red-500/20 hover:bg-red-500/40 text-red-400 hover:text-red-300 font-bold text-sm rounded border border-red-500/30 transition-colors disabled:opacity-50"
+                              >
+                                {decliningId === trade.id ? 'Declining...' : 'Decline'}
+                              </button>
+                              <button 
+                                onClick={() => handleApproveTrade(trade.id)}
+                                disabled={approvingId === trade.id || decliningId === trade.id}
+                                className="px-4 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-sm rounded transition-colors disabled:opacity-50"
+                              >
+                                {approvingId === trade.id ? 'Approving...' : '✅ Approve'}
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Trade Details */}
+                          <div className="grid grid-cols-4 gap-3 mb-3">
+                            <div className="bg-black/20 rounded-lg p-2 text-center">
+                              <p className="text-[9px] text-zinc-500 uppercase">Entry</p>
+                              <p className="text-xs font-mono text-zinc-200">${trade.entryPrice?.toFixed?.(4) || trade.entryPrice}</p>
+                            </div>
+                            <div className="bg-black/20 rounded-lg p-2 text-center">
+                              <p className="text-[9px] text-zinc-500 uppercase">Stop Loss</p>
+                              <p className="text-xs font-mono text-red-400">${trade.stopLossPrice?.toFixed?.(4) || trade.stopLossPrice || '—'}</p>
+                            </div>
+                            <div className="bg-black/20 rounded-lg p-2 text-center">
+                              <p className="text-[9px] text-zinc-500 uppercase">Take Profit</p>
+                              <p className="text-xs font-mono text-emerald-400">${trade.takeProfitPrice?.toFixed?.(4) || trade.takeProfitPrice || '—'}</p>
+                            </div>
+                            <div className="bg-black/20 rounded-lg p-2 text-center">
+                              <p className="text-[9px] text-zinc-500 uppercase">Confidence</p>
+                              <p className="text-xs font-mono text-amber-400">{trade.confidence || '—'}%</p>
+                            </div>
                           </div>
                           
                           <div className="bg-black/20 p-3 rounded-lg border border-black/40">

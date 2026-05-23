@@ -272,14 +272,17 @@ const optimizeStrategyTool: FunctionDeclaration = {
 
 const updateRiskSettingsTool: FunctionDeclaration = {
   name: 'updateRiskSettings',
-  description: 'Update the global risk management settings for the user (Max Daily Loss, Position Sizing, Auto-Liquidate).',
+  description: 'Update the global risk management settings for the user (Max Daily Loss, Position Sizing, Auto-Liquidate, Trade Parameters).',
   parameters: {
     type: Type.OBJECT,
     properties: {
       maxDailyLoss: { type: Type.NUMBER, description: 'Maximum allowed daily loss in dollars before trading is halted.' },
       maxPositionSizePct: { type: Type.NUMBER, description: 'Maximum percentage of portfolio allowed per trade (1-100).' },
       autoLiquidateThreshold: { type: Type.NUMBER, description: 'Dollar amount loss threshold to automatically close a position.' },
-      requireConfirmation: { type: Type.BOOLEAN, description: 'Whether Jarvis needs manual confirmation before executing trades.' }
+      requireConfirmation: { type: Type.BOOLEAN, description: 'Whether Jarvis needs manual confirmation before executing trades.' },
+      capitalPerTrade: { type: Type.NUMBER, description: 'Dollar amount to allocate per trade (e.g., 7000 for $7000 per trade).' },
+      profitTarget: { type: Type.NUMBER, description: 'Dollar profit target to auto-exit each trade (e.g., 5 for $5 profit exit).' },
+      maxOpenPositions: { type: Type.NUMBER, description: 'Maximum number of simultaneous open positions allowed.' }
     },
     required: ['maxDailyLoss', 'maxPositionSizePct', 'autoLiquidateThreshold', 'requireConfirmation']
   }
@@ -337,6 +340,19 @@ const getKellyStatsTool: FunctionDeclaration = {
       userId: { type: Type.STRING, description: 'The user ID to get stats for.' }
     },
     required: ['userId']
+  }
+};
+
+const queryTradeDiaryTool: FunctionDeclaration = {
+  name: 'queryTradeDiary',
+  description: 'Query the trade diary to recall past trading decisions, outcomes, lessons learned, vetoes, and reasoning. Use when the user asks "why did you buy BTC?", "what lessons did we learn?", "show me recent trade decisions", "what trades were vetoed?", or any question about past trading history and decision rationale.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      symbol: { type: Type.STRING, description: 'Optional. Filter by specific symbol (e.g., "BTC/USDT").' },
+      limit: { type: Type.NUMBER, description: 'Optional. Number of recent entries to retrieve. Default is 10.' }
+    },
+    required: []
   }
 };
 
@@ -621,6 +637,29 @@ export function useJarvisLive(
         console.warn('Failed to fetch briefing:', e);
       }
 
+      // Fetch Trade Parameters from risk settings
+      let tradeParamsContext = '';
+      try {
+        const userId = (await import('../firebase')).auth.currentUser?.uid;
+        if (userId) {
+          const riskRes = await fetch(`/api/risk-settings?userId=${userId}`);
+          const riskData = await riskRes.json();
+          if (riskData.settings) {
+            const s = riskData.settings;
+            tradeParamsContext = `\n[USER TRADE PARAMETERS — Always reference these when the user asks about their trade parameters or settings]
+Capital Per Trade: $${s.capitalPerTrade || 8000}
+Profit Target: $${s.profitTarget || 50} (auto-exit when profit hits this amount)
+Max Daily Loss: $${s.maxDailyLoss || 1000}
+Max Position Size: ${s.maxPositionSizePct || 10}% of portfolio
+Auto-Liquidate: $${s.autoLiquidateThreshold || 300} (force-close at this loss)
+Max Open Positions: ${s.maxOpenPositions || 5}
+When the user says "buy NEAR" without specifying an amount, use capitalPerTrade ($${s.capitalPerTrade || 8000}) as the investAmount. When no profit target is specified, use $${s.profitTarget || 50} as the profitTarget.`;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to fetch trade parameters:', e);
+      }
+
       const systemInstruction = `${personalityInstructions[personality]}
 
 ${soulContent}
@@ -640,6 +679,7 @@ Today's P&L: $${portfolioState ? portfolioState.todayPnl.toFixed(2) : 'unknown'}
 Open Positions: ${portfolioState ? portfolioState.openPositions : 'unknown'}
 Realized P&L: $${portfolioState ? portfolioState.realizedPnl.toFixed(2) : 'unknown'}
 Unrealized P&L: $${portfolioState ? portfolioState.unrealizedPnl.toFixed(2) : 'unknown'}
+${tradeParamsContext}
 
 [BROKER STATUS]
 ${brokerStatus || 'No broker connected. Paper trading only.'}
@@ -692,7 +732,7 @@ ${morningBriefing}`;
             },
           },
           tools: [
-            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, switchTradingModeTool, getMarketPriceTool, executeTradeTool, closePositionTool, panicCloseAllTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool, studyWebsiteTool, deepStudyWebsiteTool, createTradingGoalTool, inspectSystemTool, checkMarketRegimeTool, getKellyStatsTool] }
+            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, switchTradingModeTool, getMarketPriceTool, executeTradeTool, closePositionTool, panicCloseAllTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool, studyWebsiteTool, deepStudyWebsiteTool, createTradingGoalTool, inspectSystemTool, checkMarketRegimeTool, getKellyStatsTool, queryTradeDiaryTool] }
           ],
           systemInstruction: systemInstruction,
           inputAudioTranscription: {},
@@ -959,7 +999,7 @@ ${morningBriefing}`;
                       response = { status: 'error', message: 'Failed to optimize strategy' };
                     }
                   } else if (call.name === 'updateRiskSettings') {
-                    const { maxDailyLoss, maxPositionSizePct, autoLiquidateThreshold, requireConfirmation } = call.args as any;
+                    const { maxDailyLoss, maxPositionSizePct, autoLiquidateThreshold, requireConfirmation, capitalPerTrade, profitTarget, maxOpenPositions } = call.args as any;
                     try {
                       const { auth } = await import('../firebase');
                       if (auth.currentUser) {
@@ -974,6 +1014,9 @@ ${morningBriefing}`;
                           ...(maxPositionSizePct !== undefined && { maxPositionSizePct }),
                           ...(autoLiquidateThreshold !== undefined && { autoLiquidateThreshold }),
                           ...(requireConfirmation !== undefined && { requireConfirmation }),
+                          ...(capitalPerTrade !== undefined && { capitalPerTrade }),
+                          ...(profitTarget !== undefined && { profitTarget }),
+                          ...(maxOpenPositions !== undefined && { maxOpenPositions }),
                         };
 
                         await fetch('/api/risk-settings', {
@@ -1497,6 +1540,45 @@ ${morningBriefing}`;
                     } catch (e: any) {
                       clearPipelineAction();
                       response = { status: 'error', message: `Failed to get Kelly stats: ${e.message}` };
+                    }
+                  } else if (call.name === 'queryTradeDiary') {
+                    const { symbol, limit: diaryLimit } = call.args as any;
+                    setPipelineAction('diary', 'Querying trade diary...', '#f59e0b');
+                    try {
+                      const effectiveUserId = auth.currentUser?.uid;
+                      if (!effectiveUserId) throw new Error('Not logged in');
+
+                      const params = new URLSearchParams();
+                      if (diaryLimit) params.set('limit', String(diaryLimit));
+                      if (symbol) params.set('symbol', symbol);
+
+                      const res = await fetch(`/api/diary/${effectiveUserId}?${params.toString()}`);
+                      const data = await res.json();
+                      clearPipelineAction('✓ Diary loaded');
+
+                      const entries = (data.entries || []).map((e: any) => ({
+                        symbol: e.symbol,
+                        decision: e.decision,
+                        side: e.side,
+                        reasoning: e.reasoning?.slice(0, 200),
+                        regime: e.regime,
+                        confidence: e.confidence,
+                        outcome: e.outcome || 'N/A',
+                        grade: e.grade || 'N/A',
+                        pnl: e.pnl !== undefined ? `$${e.pnl.toFixed(2)}` : 'N/A',
+                        lessons: e.lessons || [],
+                        timestamp: e.timestamp,
+                      }));
+
+                      response = {
+                        status: 'success',
+                        count: data.count,
+                        entries,
+                        message: `Found ${data.count} diary entries${symbol ? ` for ${symbol}` : ''}. Use this data to answer the user's question about past trades, decisions, and lessons learned.`
+                      };
+                    } catch (e: any) {
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to query trade diary: ${e.message}` };
                     }
                   }
 

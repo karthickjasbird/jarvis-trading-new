@@ -411,6 +411,24 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
     return data.executedTrade;
   }, [userId]);
 
+  const declineTrade = useCallback(async (tradeId: string) => {
+    const effectiveUserId = userId || auth.currentUser?.uid || '';
+    if (!effectiveUserId) throw new Error("Not authenticated");
+    
+    const res = await fetch('/api/trade/decline', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: effectiveUserId, tradeId })
+    });
+
+    const data = await res.json();
+    if (data.error) {
+      throw new Error(data.error);
+    }
+
+    return data;
+  }, [userId]);
+
   // Calculate Daily P&L — tracks date changes for midnight rollover
   const [todayStr, setTodayStr] = useState(() => {
     const now = new Date();
@@ -456,6 +474,7 @@ export function useTrades(userId: string, isPracticeMode: boolean = false) {
     closePosition,
     panicCloseAll,
     approveTrade,
+    declineTrade,
     isLoading
   };
 }

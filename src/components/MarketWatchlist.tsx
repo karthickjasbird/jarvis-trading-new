@@ -15,6 +15,9 @@ interface CoinData {
   confluence?: string;
   taSignal?: string;
   signal?: string;
+  obv?: number;
+  obvSlope?: 'up' | 'down' | 'flat';
+  vwap?: number;
 }
 
 type SortKey = 'score' | 'change24h' | 'volume24h' | 'price';
@@ -232,9 +235,35 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
                       {coin.change24h >= 0 ? '+' : ''}{coin.change24h.toFixed(2)}%
                     </span>
                   </div>
-                  {coin.rsi && (
-                    <p className="text-[10px] text-zinc-500 mt-1">RSI: {coin.rsi}</p>
-                  )}
+                  <div className="flex flex-wrap items-center gap-1 mt-2">
+                    {coin.rsi && <span className="text-[10px] text-zinc-500 mr-1">RSI: {coin.rsi}</span>}
+                    {coin.vwap !== undefined && (
+                      coin.price > coin.vwap ? (
+                        <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded">
+                          VWAP ▲
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center text-[9px] font-medium px-1.5 py-0.5 bg-zinc-800 text-zinc-500 border border-zinc-700/20 rounded">
+                          VWAP ▼
+                        </span>
+                      )
+                    )}
+                    {coin.obvSlope && (
+                      coin.obvSlope === 'up' ? (
+                        <span className="inline-flex items-center text-[9px] font-bold px-1.5 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded">
+                          OBV ▲
+                        </span>
+                      ) : coin.obvSlope === 'down' ? (
+                        <span className="inline-flex items-center text-[9px] font-medium px-1.5 py-0.5 bg-zinc-800 text-zinc-500 border border-zinc-700/20 rounded">
+                          OBV ▼
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center text-[9px] font-medium px-1.5 py-0.5 bg-zinc-800 text-zinc-500 border border-zinc-700/20 rounded">
+                          OBV ▬
+                        </span>
+                      )
+                    )}
+                  </div>
                 </button>
               );
             })}
@@ -294,7 +323,35 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
                   }`} />
                   <div>
                     <p className="text-white font-medium text-sm">{coin.symbol.replace('/USDT', '')}</p>
-                    {coin.rsi && <p className="text-[10px] text-zinc-600">RSI: {coin.rsi}</p>}
+                    <div className="flex items-center gap-1 mt-0.5">
+                      {coin.rsi && <span className="text-[10px] text-zinc-500 mr-1.5">RSI: {coin.rsi}</span>}
+                      {coin.vwap !== undefined && (
+                        coin.price > coin.vwap ? (
+                          <span className="inline-flex items-center text-[9px] font-bold px-1 py-0.25 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded">
+                            VWAP ▲
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center text-[9px] font-medium px-1 py-0.25 bg-zinc-800 text-zinc-500 border border-zinc-700/20 rounded">
+                            VWAP ▼
+                          </span>
+                        )
+                      )}
+                      {coin.obvSlope && (
+                        coin.obvSlope === 'up' ? (
+                          <span className="inline-flex items-center text-[9px] font-bold px-1 py-0.25 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded">
+                            OBV ▲
+                          </span>
+                        ) : coin.obvSlope === 'down' ? (
+                          <span className="inline-flex items-center text-[9px] font-medium px-1 py-0.25 bg-zinc-800 text-zinc-500 border border-zinc-700/20 rounded">
+                            OBV ▼
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center text-[9px] font-medium px-1 py-0.25 bg-zinc-800 text-zinc-500 border border-zinc-700/20 rounded">
+                            OBV ▬
+                          </span>
+                        )
+                      )}
+                    </div>
                   </div>
                 </div>
 

@@ -5,10 +5,13 @@ import { Brain, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 interface Position {
   id: string;
   symbol: string;
-  side: 'long' | 'short';
+  side: 'long' | 'short' | 'buy' | 'sell';
   entryPrice: number;
   quantity: number;
   pnl?: number;
+  // Phase 7-D: optional SL/TP for in-chart trade visualization
+  stopLossPrice?: number;
+  takeProfitPrice?: number;
 }
 
 interface Trade {
@@ -39,7 +42,11 @@ export function LiveJarvisChart({
   
   const [loading, setLoading] = useState(true);
   const [currentPrice, setCurrentPrice] = useState(0);
-  const entryLineRef = useRef<any>(null); // Track active entry price line for cleanup
+  // Phase 7-D: refs for the 3 trade-overlay price lines so we can remove them
+  // cleanly when the trade changes / closes.
+  const entryLineRef = useRef<any>(null);
+  const slLineRef = useRef<any>(null);
+  const tpLineRef = useRef<any>(null);
 
   const cleanSymbol = (symbol || '').replace('BINANCE:', '').replace('/', '').toLowerCase();
 
@@ -150,36 +157,96 @@ export function LiveJarvisChart({
     };
   }, [cleanSymbol]);
 
-  // 3. Draw entry price line + markers based on Live Trade State
+  // 3. Draw trade-overlay price lines (Entry / SL / TP) — Phase 7-D
+  //    Entry = blue (neutral), SL = red, TP = green. Same colors regardless of
+  //    side: SL is "where I lose" and TP is "where I win", which is what users
+  //    actually care about. R:R is computed and shown on the entry line.
   useEffect(() => {
-    if (!candleSeriesRef.current) return;
+    const series = candleSeriesRef.current;
+    if (!series) return;
 
-    // Remove previous entry line if it exists
-    if (entryLineRef.current) {
-      try {
-        candleSeriesRef.current.removePriceLine(entryLineRef.current);
-      } catch (e) { /* already removed */ }
-      entryLineRef.current = null;
-    }
+    // Cleanup any previously drawn lines
+    const safeRemove = (ref: React.MutableRefObject<any>) => {
+      if (ref.current) {
+        try { series.removePriceLine(ref.current); } catch { /* already gone */ }
+        ref.current = null;
+      }
+    };
+    safeRemove(entryLineRef);
+    safeRemove(slLineRef);
+    safeRemove(tpLineRef);
 
     // Find active position for this symbol
     const pos = positions?.find(p => p?.symbol?.replace('/', '').toLowerCase() === cleanSymbol);
     if (!pos || !pos.entryPrice) return;
 
     const isBuy = pos.side === 'long' || pos.side === 'buy';
+    const sideLabel = isBuy ? 'LONG' : 'SHORT';
+    const sl = pos.stopLossPrice;
+    const tp = pos.takeProfitPrice;
 
-    // Draw a dashed horizontal line at the entry price
-    const entryLine = candleSeriesRef.current.createPriceLine({
+    // Risk/Reward ratio (1:X) — only computable when both SL and TP exist
+    let rrLabel = '';
+    if (sl && tp) {
+      const risk = Math.abs(pos.entryPrice - sl);
+      const reward = Math.abs(tp - pos.entryPrice);
+      if (risk > 0) rrLabel = ` · R:R 1:${(reward / risk).toFixed(2)}`;
+    }
+
+    // Entry — blue, solid, prominent
+    entryLineRef.current = series.createPriceLine({
       price: pos.entryPrice,
-      color: isBuy ? '#22c55e' : '#ef4444',
+      color: '#3b82f6',
       lineWidth: 2,
-      lineStyle: 2, // Dashed
+      lineStyle: 0, // Solid
       axisLabelVisible: true,
-      title: `⚡ ${isBuy ? 'BUY' : 'SELL'} ENTRY @ $${pos.entryPrice.toFixed(4)}`,
+      title: `${sideLabel} @ $${pos.entryPrice.toFixed(4)}${rrLabel}`,
     });
-    entryLineRef.current = entryLine;
 
+    // Stop Loss — red, dashed
+    if (sl) {
+      slLineRef.current = series.createPriceLine({
+        price: sl,
+        color: '#ef4444',
+        lineWidth: 2,
+        lineStyle: 2, // Dashed
+        axisLabelVisible: true,
+        title: `SL $${sl.toFixed(4)}`,
+      });
+    }
+
+    // Take Profit — green, dashed
+    if (tp) {
+      tpLineRef.current = series.createPriceLine({
+        price: tp,
+        color: '#22c55e',
+        lineWidth: 2,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: `TP $${tp.toFixed(4)}`,
+      });
+    }
   }, [positions, tradeHistory, cleanSymbol]);
+
+  // Phase 7-D: show a brief "✅ Win" / "❌ Loss" badge after a trade just closed
+  // (within the last 30 seconds) for the symbol currently on the chart.
+  const recentlyClosed = (() => {
+    if (!tradeHistory || tradeHistory.length === 0) return null;
+    const matching = tradeHistory.filter(t =>
+      t?.symbol?.replace('/', '').toLowerCase() === cleanSymbol && t.closedAt
+    );
+    if (matching.length === 0) return null;
+    // Newest first
+    matching.sort((a, b) => {
+      const ta = typeof a.closedAt === 'string' ? new Date(a.closedAt).getTime() : (a.closedAt || 0);
+      const tb = typeof b.closedAt === 'string' ? new Date(b.closedAt).getTime() : (b.closedAt || 0);
+      return tb - ta;
+    });
+    const latest = matching[0];
+    const closedMs = typeof latest.closedAt === 'string' ? new Date(latest.closedAt).getTime() : (latest.closedAt || 0);
+    if (Date.now() - closedMs > 30_000) return null;
+    return latest;
+  })();
 
   const activePos = positions?.find(p => p?.symbol?.replace('/', '').toLowerCase() === cleanSymbol);
   const isLong = activePos?.side === 'long' || activePos?.side === 'buy';
@@ -208,6 +275,16 @@ export function LiveJarvisChart({
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 font-mono text-violet-400 bg-zinc-950/90">
             <div className="w-8 h-8 border-2 border-violet-500/40 border-t-violet-500 rounded-full animate-spin" />
             <span className="text-sm">Connecting to Matrix...</span>
+          </div>
+        )}
+        {/* Phase 7-D: brief result badge when a trade just closed */}
+        {recentlyClosed && (
+          <div className={`absolute top-3 left-3 z-20 px-3 py-1.5 rounded-lg font-mono text-sm font-bold shadow-lg backdrop-blur border ${
+            (recentlyClosed.pnl || 0) >= 0
+              ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+              : 'bg-red-500/20 border-red-500/40 text-red-300'
+          }`}>
+            {(recentlyClosed.pnl || 0) >= 0 ? '✅ Win' : '❌ Loss'} · {(recentlyClosed.pnl || 0) >= 0 ? '+' : ''}${(recentlyClosed.pnl || 0).toFixed(2)}
           </div>
         )}
       </div>

@@ -32,7 +32,8 @@ export class TradeExecutor {
     let riskConfig = {
       maxDailyLoss: 1000,
       maxPositionSizePct: 20,
-      autoLiquidateThreshold: 500
+      autoLiquidateThreshold: 500,
+      maxOpenPositions: 5
     };
     
     const riskDoc = await this.db.collection('riskSettings').doc(userId).get();
@@ -53,6 +54,17 @@ export class TradeExecutor {
     
     if (tradeValue > maxTradeValue) {
       throw new Error(`RISK LIMIT EXCEEDED: Trade value ($${tradeValue.toFixed(2)}) exceeds ${riskConfig.maxPositionSizePct}% of portfolio ($${maxTradeValue.toFixed(2)}).`);
+    }
+
+    // 3. Max Open Positions
+    if (riskConfig.maxOpenPositions && riskConfig.maxOpenPositions > 0) {
+      const openSnap = await this.db.collection('trades')
+        .where('userId', '==', userId)
+        .where('status', '==', 'open')
+        .get();
+      if (openSnap.size >= riskConfig.maxOpenPositions) {
+        throw new Error(`RISK LIMIT EXCEEDED: Already at max open positions (${openSnap.size}/${riskConfig.maxOpenPositions}).`);
+      }
     }
   }
 
@@ -454,11 +466,18 @@ export class TradeExecutor {
       .where('userId', '==', userId)
       .where('status', '==', 'closed')
       .where('isPractice', '==', isPracticeMode)
-      .orderBy('closedAt', 'desc')
-      .limit(limit)
       .get();
 
-    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const trades = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    // Sort in-memory by closedAt descending
+    trades.sort((a: any, b: any) => {
+      const aTime = a.closedAt ? (a.closedAt.toDate ? a.closedAt.toDate().getTime() : new Date(a.closedAt).getTime()) : 0;
+      const bTime = b.closedAt ? (b.closedAt.toDate ? b.closedAt.toDate().getTime() : new Date(b.closedAt).getTime()) : 0;
+      return bTime - aTime;
+    });
+
+    return trades.slice(0, limit);
   }
 
   async getDailyPnl(userId: string, isPracticeMode: boolean = false) {

@@ -252,7 +252,7 @@ export class GoalExecutor {
         // Use Kelly-optimal position sizing instead of equal splitting
         const kellyResult = await this.kellyCalculator.getOptimalPositionSize(
           campaign.userId,
-          campaign.remainingCapital,
+          campaign.availableCapital,
           opp.symbol,
           regime.confidence
         );

@@ -30,6 +30,9 @@ export interface ScanResult {
   rsi?: number;
   confluence?: string;
   taSignal?: string;
+  obv?: number;
+  obvSlope?: 'up' | 'down' | 'flat';
+  vwap?: number;
 }
 
 export interface ScanSummary {
@@ -199,25 +202,38 @@ export class MarketScanner {
       };
     });
 
-    // Step 2: Run TA on ALL coins in parallel (batches of 5 to respect rate limits)
+    // Step 2: Run MULTI-TIMEFRAME TA on ALL coins in parallel (batches of 5)
+    // FIX: Previously used 1H-only candles which showed BUY while Scout's multi-TF
+    // analysis showed SELL. Now both use the same multi-TF confluence.
     const BATCH_SIZE = 5;
     for (let batch = 0; batch < results.length; batch += BATCH_SIZE) {
       const batchResults = results.slice(batch, batch + BATCH_SIZE);
       
       await Promise.allSettled(batchResults.map(async (result) => {
         try {
+          // Use multi-timeframe analysis (1H + 4H + 1D) — same as Scout
+          const mtfReport = await this.taEngine.analyzeSymbol(result.symbol);
+          
+          // Extract 1H indicators for display (RSI, OBV, VWAP)
+          const h1Analysis = mtfReport.analyses.find(a => a.timeframe === '1H');
+          if (h1Analysis) {
+            const indicators = h1Analysis.indicators;
+            result.rsi = indicators.rsi !== null ? Math.round(indicators.rsi) : undefined;
+            result.obv = indicators.obv !== null ? Math.round(indicators.obv) : undefined;
+            result.obvSlope = indicators.obvSlope ?? undefined;
+            result.vwap = indicators.vwap !== null ? indicators.vwap : undefined;
+          }
+
+          // Use multi-TF CONFLUENCE bias (not just 1H) for score & signal
+          result.confluence = mtfReport.confluence.bias;
+          result.taSignal = mtfReport.confluence.reasons.slice(0, 3).join('; ');
+
+          console.log(`[SCANNER] 📊 Volume Intelligence for ${result.symbol}: OBV=${result.obv} (${result.obvSlope}), VWAP=${result.vwap?.toFixed(4)}, Price=${result.price}`);
+
+          // Calculate TA-driven score using CONFLUENCE bias
           const cleanSymbol = result.symbol.replace('/USDT', 'USDT');
-          const candles = await this.taEngine.fetchCandles(cleanSymbol, '1h', 100);
-          const indicators = this.taEngine.computeIndicators(candles);
-          const taSignal = this.taEngine.generateSignal(indicators);
-
-          result.rsi = indicators.rsi !== null ? Math.round(indicators.rsi) : undefined;
-          result.confluence = taSignal.bias;
-          result.taSignal = taSignal.reasons.slice(0, 3).join('; ');
-
-          // Calculate TA-driven score
           const ticker = tickers.find((t: any) => t.symbol === cleanSymbol);
-          result.score = this.calculateScoreWithTA(ticker, taSignal.bias, taSignal.confidence);
+          result.score = this.calculateScoreWithTA(ticker, mtfReport.confluence.bias, mtfReport.confluence.confidence);
         } catch (err: any) {
           console.error(`[SCANNER] TA failed for ${result.symbol}:`, err.message);
           // Fallback: use basic momentum-only score
