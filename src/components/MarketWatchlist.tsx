@@ -21,6 +21,11 @@ interface CoinData {
 }
 
 type SortKey = 'score' | 'change24h' | 'volume24h' | 'price';
+type AssetClass = 'crypto' | 'stocks' | 'commodities';
+
+// Subset of STOCK_SCAN_PAIRS that the Commodities tab filters down to.
+// Kept in sync with engine/marketScanner.ts.
+const COMMODITY_TICKERS = new Set(['GLD', 'SLV', 'USO', 'UNG', 'DBA', 'COPX']);
 
 /**
  * Derive a unified verdict from the TA signal + score.
@@ -79,22 +84,43 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
   const [sortBy, setSortBy] = useState<SortKey>('score');
   const [sortAsc, setSortAsc] = useState(false);
   const [lastScanTime, setLastScanTime] = useState<string>('');
+  const [assetClass, setAssetClass] = useState<AssetClass>('crypto');
+  const [marketOpen, setMarketOpen] = useState<boolean | null>(null);
+
+  // Equity-side data fetcher. POSTs to scan-stocks; for the Commodities tab
+  // we filter the shared stock scan down to the commodity ETF set client-side
+  // (same data, no second backend call needed).
+  const fetchStocks = useCallback(async (filterCommodities: boolean) => {
+    const res = await fetch('/api/scanner/scan-stocks', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Stock scan failed');
+    const list: CoinData[] = (data.allResults || []) as CoinData[];
+    return filterCommodities ? list.filter(c => COMMODITY_TICKERS.has(c.symbol)) : list;
+  }, []);
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch('/api/scanner/latest');
-      const data = await res.json();
-      if (data.allResults) {
-        setCoins(data.allResults);
-      } else if (data.topOpportunities) {
-        setCoins(data.topOpportunities);
-      }
-      if (data.timestamp) {
-        setLastScanTime(new Date(data.timestamp).toLocaleTimeString());
+      if (assetClass === 'crypto') {
+        const res = await fetch('/api/scanner/latest');
+        const data = await res.json();
+        if (data.allResults) setCoins(data.allResults);
+        else if (data.topOpportunities) setCoins(data.topOpportunities);
+        if (data.timestamp) setLastScanTime(new Date(data.timestamp).toLocaleTimeString());
+      } else {
+        const list = await fetchStocks(assetClass === 'commodities');
+        setCoins(list);
+        setLastScanTime(new Date().toLocaleTimeString());
       }
       setLoading(false);
     } catch {
-      // Fallback: fetch directly from Binance
+      // For the crypto tab, fall back to a direct Binance read so the UI
+      // still renders if our scanner endpoint is down. Stocks have no
+      // equivalent free fallback — surface empty results.
+      if (assetClass !== 'crypto') {
+        setCoins([]);
+        setLoading(false);
+        return;
+      }
       try {
         const res = await fetch('https://api.binance.com/api/v3/ticker/24hr');
         const allTickers = await res.json();
@@ -120,32 +146,58 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
         setLoading(false);
       }
     }
-  }, []);
+  }, [assetClass, fetchStocks]);
 
   const triggerScan = useCallback(async () => {
     setScanning(true);
     try {
-      const res = await fetch('/api/scanner/scan', { method: 'POST' });
-      const data = await res.json();
-      if (data.allResults) {
-        setCoins(data.allResults);
-      } else if (data.topOpportunities) {
-        setCoins(data.topOpportunities);
-      }
-      if (data.timestamp) {
-        setLastScanTime(new Date(data.timestamp).toLocaleTimeString());
+      if (assetClass === 'crypto') {
+        const res = await fetch('/api/scanner/scan', { method: 'POST' });
+        const data = await res.json();
+        if (data.allResults) setCoins(data.allResults);
+        else if (data.topOpportunities) setCoins(data.topOpportunities);
+        if (data.timestamp) setLastScanTime(new Date(data.timestamp).toLocaleTimeString());
+      } else {
+        const list = await fetchStocks(assetClass === 'commodities');
+        setCoins(list);
+        setLastScanTime(new Date().toLocaleTimeString());
       }
     } catch (e) {
       console.error('Scan failed:', e);
     }
     setScanning(false);
-  }, []);
+  }, [assetClass, fetchStocks]);
 
+  // Re-run the data fetch whenever the user switches tabs so the table
+  // populates immediately instead of waiting for the 30s interval tick.
   useEffect(() => {
+    setLoading(true);
+    setCoins([]);
     fetchData();
-    const interval = setInterval(fetchData, 30000); // Refresh every 30s
+    const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
   }, [fetchData]);
+
+  // Equity market clock: only relevant for the stock/commodity tabs.
+  // Refresh every 60s — the open/close transition is the only thing
+  // worth chasing and it happens at well-known times.
+  useEffect(() => {
+    if (assetClass === 'crypto') {
+      setMarketOpen(null);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch('/api/alpaca/clock');
+        const data = await res.json();
+        if (!cancelled && typeof data.is_open === 'boolean') setMarketOpen(data.is_open);
+      } catch {}
+    };
+    tick();
+    const interval = setInterval(tick, 60000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [assetClass]);
 
   const handleSort = (key: SortKey) => {
     if (sortBy === key) setSortAsc(!sortAsc);
@@ -181,7 +233,20 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
         <div className="flex items-center gap-2">
           <BarChart3 className="w-5 h-5 text-amber-400" />
           <h1 className="text-base font-semibold text-white">Market Scanner</h1>
-          <span className="text-xs text-zinc-600">{coins.length} pairs</span>
+          <span className="text-xs text-zinc-600">{coins.length} {assetClass === 'crypto' ? 'pairs' : 'tickers'}</span>
+          {assetClass !== 'crypto' && marketOpen !== null && (
+            <span
+              className={`ml-2 inline-flex items-center gap-1 text-[10px] font-bold border rounded-full px-2 py-0.5 ${
+                marketOpen
+                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                  : 'bg-zinc-700/20 text-zinc-500 border-zinc-600/40'
+              }`}
+              title={marketOpen ? 'US equity market is open' : 'US equity market is closed — last-session data'}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${marketOpen ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
+              {marketOpen ? 'MARKET OPEN' : 'MARKET CLOSED'}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           {lastScanTime && (
@@ -196,6 +261,27 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
             {scanning ? 'Scanning...' : 'Scan Now'}
           </button>
         </div>
+      </div>
+
+      {/* Asset-class tabs (Phase 8.4) */}
+      <div className="flex items-center gap-1 bg-zinc-900/60 border border-zinc-800 rounded-lg p-1 w-fit">
+        {(['crypto', 'stocks', 'commodities'] as AssetClass[]).map((cls) => {
+          const active = assetClass === cls;
+          const label = cls === 'crypto' ? '🪙 Crypto' : cls === 'stocks' ? '📈 Stocks' : '🛢️ Commodities';
+          return (
+            <button
+              key={cls}
+              onClick={() => setAssetClass(cls)}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all ${
+                active
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                  : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
+              }`}
+            >
+              {label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Hot Picks Section — ONLY BUY signals */}
@@ -283,8 +369,10 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
       <div>
         <div className="flex items-center gap-2 mb-3">
           <BarChart3 className="w-4 h-4 text-zinc-400" />
-          <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">All Markets</h2>
-          <span className="text-xs text-zinc-600">({coins.length} pairs)</span>
+          <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
+            {assetClass === 'crypto' ? 'All Markets' : assetClass === 'stocks' ? 'All Stocks' : 'All Commodities'}
+          </h2>
+          <span className="text-xs text-zinc-600">({coins.length} {assetClass === 'crypto' ? 'pairs' : 'tickers'})</span>
         </div>
 
         <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl overflow-hidden">

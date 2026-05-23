@@ -59,10 +59,15 @@ function scanEngines(projectRoot: string): EngineInfo[] {
     'atrCalculator.ts': 'ATR-based dynamic position sizing',
     'backtestEngine.ts': 'Historical backtesting engine',
     'userSecrets.ts': 'Per-user encrypted API key storage',
-    'goalExecutor.ts': 'Autonomous campaign manager — multi-trade goal execution with trade chaining, slot management, and auto-compounding',
+    'goalExecutor.ts': 'Autonomous campaign manager — multi-trade goal execution with trade chaining, slot management, auto-compounding, and Deadline-Aware Strategy Router (scalp/day/swing/position buckets that pick markets, timeframe, and Kelly multiplier from time-to-deadline)',
     'regimeDetector.ts': 'Market regime detection — classifies markets as trending_up, trending_down, ranging, or volatile using ADX/ATR/EMA',
     'kellyCalculator.ts': 'Kelly Criterion position sizing — mathematically optimal bet sizes based on historical win rate and payoff ratios',
     'manifestGenerator.ts': 'Self-awareness system — auto-scans codebase to generate Jarvis knowledge manifest',
+    'alpacaConnector.ts': 'Alpaca REST connector — US stocks and commodity ETFs (paper + live). Mirrors ccxt return shape for the executor; provides market clock, latest quote, bars, market orders, position queries',
+    'tradeDiary.ts': 'Decision audit trail — logs every swarm decision (incl. vetoes, rejections, regime skips) and serves lessons-learned to the Sentinel for symbol-specific risk recall',
+    'tradingViewBridge.ts': 'TradingView Bridge — puppeteer-core CDP attach to a user-launched Chrome. setSymbol/setTimeframe/screenshot/evaluate plus a chart-legend reader',
+    'tvIndicators.ts': 'TradingView indicator parsers — reads RSI, Ichimoku, Supertrend, Volume from the TV chart legend DOM and overlays values onto local snapshots',
+    'tvVision.ts': 'AI Vision chart analysis — Gemini 2.5-flash reads TradingView screenshots for patterns, S/R levels, and directional bias. Single-TF + multi-TF entry points',
   };
 
   const ownerScopedEngines = ['sentry.ts', 'agentSwarm.ts', 'positionMonitor.ts', 'portfolioIntel.ts'];
@@ -155,24 +160,39 @@ export function generateAppManifest(projectRoot: string): AppManifest {
 
   // Derive human-readable capabilities
   const capabilities = [
-    'Real-time cryptocurrency price monitoring via Binance WebSocket',
-    'Paper trading with $100K virtual balance',
-    'Live trading via Binance and Zerodha broker APIs',
+    // Asset universe
+    'Multi-market trading: 48 curated crypto pairs (Binance) + 33 US stocks + 6 commodity ETFs (Alpaca) — 87 instruments scanned',
+    'Crypto sectors covered: L1, L2, DeFi, AI, Meme, RWA, Gaming, Utility, DEX/Oracle infra',
+    'US equity sectors covered: mega-cap tech, semis/AI hardware, software/cloud, finance/payments, consumer/retail, index ETFs, commodity ETFs (GLD/SLV/USO/UNG/DBA/COPX)',
+    // Broker paths
+    'Live broker routing: Binance + Bybit (crypto via ccxt), Zerodha (Indian equities via Kite), Alpaca (US stocks + commodity ETFs)',
+    'Paper trading with $100K virtual balance — same code path as live, just isPractice=true',
+    'Market-hours guard: stock orders pre-check Alpaca clock and reject cleanly when US session closed',
+    // Pipeline
+    '7-step autonomous decision pipeline: Regime → Scout → Analyst + Scholar → Holistic (Gemini Vision + TV legend) → Strategist → Sentinel → Executor',
+    'TradingView Bridge: puppeteer CDP attach to a user-launched Chrome — Jarvis can read the same chart you are looking at (symbol/timeframe/screenshot/legend values)',
+    'AI Vision chart analysis: Gemini 2.5-flash reads TradingView screenshots for patterns, S/R levels, and directional bias',
+    'Trade Diary: every decision (including vetoes and regime skips) is logged; the Sentinel queries past losses on the symbol to inject lessons learned before the next entry',
+    // Risk math
+    'Kelly Criterion position sizing × Regime multiplier × Deadline-aware Strategy multiplier',
+    'Deadline-Aware Strategy Router: maps remaining time-to-deadline to one of 4 buckets — scalp (<6h, crypto only, 1H, Kelly ×1.3), day (6h-3d, +stocks when US open, 1H/4H), swing (3-14d, +commodities, 4H, Kelly ×0.9), position (>14d, 1D, Kelly ×0.8)',
+    'Market Regime Detection: ADX/ATR/EMA-based trending/ranging/volatile classification with per-regime position-size and SL/TP multipliers',
+    'TA-driven crypto scanner: OBV, VWAP, RSI, MACD, EMA, Bollinger Bands, ATR, ADX across 1H/4H/1D — bearish coins capped at score 45, only BUY signals reach Jarvis Picks',
+    'Risk management: daily loss limits, max position size %, max open positions, correlation guard, circuit breaker',
+    // Learning + memory
+    'Vector Memory Bank with semantic search (Gemini embeddings) — Jarvis remembers trade lessons across sessions',
+    'PostMortem grader: A-F grades on closed trades with extracted lessons',
+    'Strategy tracker: per-strategy win rates with auto-disable of losers',
+    'Confidence Engine: 0-100% live-ready readiness score derived from track record',
+    // Interfaces
+    'Voice-first: Gemini Live tool-calling — Jarvis can be talked to and asked to trade, scan, explain, or check status',
+    'Two-way Telegram bot: trade notifications, approval replies, status queries',
+    'Self-awareness: this manifest is auto-regenerated on every startup so Jarvis knows about every engine, route, and capability without manual prompt-engineering',
+    // Infra
     `${engines.length} specialized engines running concurrently`,
     `${apiRouteCount} API endpoints available`,
-    '6-agent autonomous trading pipeline (Agent Swarm)',
-    'Vector memory bank with semantic search (remembers trade lessons)',
-    'Two-way Telegram bot for trade notifications and chat',
-    'Technical analysis: RSI, MACD, EMA, Bollinger Bands, ATR',
-    'Historical backtesting and strategy optimization',
-    'Risk management: daily loss limits, position sizing, circuit breaker',
-    'Web scraping and targeted learning from any URL',
-    'Multi-tenant: each user runs their own isolated instance',
+    'Multi-tenant: each user is isolated by OWNER_USER_ID with per-user encrypted API key storage',
     'Auto-updating: version checker compares local vs GitHub',
-    'Campaign Manager: autonomous multi-trade goal campaigns with trade chaining and auto-compounding',
-    'Market Regime Detection: ADX/ATR/EMA-based trending/ranging/volatile classification',
-    'Kelly Position Sizing: mathematically optimal bet sizing from historical trade data',
-    'TA-driven market scoring: bearish coins can never score above 45, only BUY signals in Jarvis Picks',
   ];
 
   return {

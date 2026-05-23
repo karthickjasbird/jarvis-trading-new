@@ -1,19 +1,79 @@
 /**
- * Market Scanner — Scans 20+ crypto pairs via Binance public API
- * 
+ * Market Scanner — Scans ~50 curated crypto pairs via Binance public API
+ *
  * Fetches real 24hr ticker data, computes momentum signals,
  * and ranks opportunities for the Agent Swarm pipeline.
  */
 
 import { generateText } from './modelRouter.ts';
 import { TechnicalAnalysisEngine } from './technicalAnalysis.ts';
+import { AlpacaConnector } from './alpacaConnector.ts';
 
-// Top 20 crypto trading pairs to scan
+// Curated Binance USDT pairs, grouped by sector. Unknown/delisted tickers are
+// silently filtered out by the 24hr ticker lookup, so a stale symbol degrades
+// gracefully rather than crashing the scan.
 export const SCAN_PAIRS = [
+  // Layer-1 base chains
   'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
-  'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT',
-  'MATICUSDT', 'ATOMUSDT', 'NEARUSDT', 'APTUSDT', 'ARBUSDT',
-  'OPUSDT', 'SUIUSDT', 'INJUSDT', 'TIAUSDT', 'SEIUSDT',
+  'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'NEARUSDT', 'APTUSDT',
+  'SUIUSDT', 'ATOMUSDT', 'TIAUSDT', 'SEIUSDT', 'TONUSDT',
+
+  // Layer-2 / scaling
+  'POLUSDT', 'ARBUSDT', 'OPUSDT', 'STRKUSDT', 'IMXUSDT',
+
+  // DeFi
+  'LINKUSDT', 'UNIUSDT', 'AAVEUSDT', 'MKRUSDT', 'LDOUSDT',
+  'INJUSDT', 'CRVUSDT', 'CAKEUSDT',
+
+  // AI / compute
+  'FETUSDT', 'TAOUSDT', 'WLDUSDT', 'RENDERUSDT',
+
+  // Meme
+  'DOGEUSDT', 'SHIBUSDT', 'PEPEUSDT', 'WIFUSDT', 'BONKUSDT', 'FLOKIUSDT',
+
+  // RWA / Real-World Assets
+  'ONDOUSDT',
+
+  // Gaming / Metaverse
+  'MANAUSDT', 'SANDUSDT', 'AXSUSDT',
+
+  // Other majors / utility
+  'LTCUSDT', 'BCHUSDT', 'ETCUSDT', 'FILUSDT',
+
+  // DEX / Oracle infra
+  'JUPUSDT', 'PYTHUSDT',
+];
+
+/**
+ * High-volume US equity tickers for Alpaca stock scanning. Grouped by
+ * sector so the Strategist can reason about diversification. Symbols are
+ * bare tickers (Alpaca convention) — no slash, no quote currency.
+ *
+ * 8.3 layers commodity ETFs onto this same list (they're regular stocks
+ * on Alpaca), so this is the single source of truth for the equity scan.
+ */
+export const STOCK_SCAN_PAIRS = [
+  // Mega-cap tech
+  'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA',
+
+  // Semis / AI hardware
+  'AMD', 'AVGO', 'TSM', 'ASML', 'ARM', 'MU',
+
+  // Software / cloud / SaaS
+  'CRM', 'ORCL', 'ADBE', 'NOW', 'SNOW', 'PLTR',
+
+  // Finance / payments
+  'JPM', 'BAC', 'V', 'MA', 'COIN', 'PYPL',
+
+  // Consumer / retail
+  'NFLX', 'COST', 'DIS', 'WMT',
+
+  // Index ETFs (for regime / hedging)
+  'SPY', 'QQQ', 'IWM', 'DIA',
+
+  // Commodity ETFs (Phase 8.3) — gold, silver, oil, nat gas, agriculture,
+  // copper miners. Regular equities on Alpaca, same code path as stocks.
+  'GLD', 'SLV', 'USO', 'UNG', 'DBA', 'COPX',
 ];
 
 export interface ScanResult {
@@ -160,7 +220,7 @@ export class MarketScanner {
    * Run a full market scan — TA-enriched for ALL coins
    */
   async scan(): Promise<ScanSummary> {
-    console.log('[SCANNER] 🔍 Scanning 20 crypto pairs with full TA...');
+    console.log(`[SCANNER] 🔍 Scanning ${SCAN_PAIRS.length} crypto pairs with full TA...`);
 
     const tickers = await this.fetchTickers();
 
@@ -321,6 +381,175 @@ Write a ONE-LINE trading signal (under 15 words) based on the REAL indicators. B
     }
 
     console.log(`[SCANNER] ✅ Scan complete: ${bullish} bullish, ${bearish} bearish, ${neutral} neutral | Sentiment: ${marketSentiment}`);
+    return summary;
+  }
+
+  /**
+   * Resolve this user's Alpaca creds. Look-up order:
+   *   1. `users/{userId}/secrets/apiKeys` (personal API keys vault)
+   *   2. `users/{userId}/brokerConfigs` with brokerName === 'alpaca'
+   *      (set via BrokerSettings; same creds power live trading)
+   *   3. `.env` fallback
+   * Returns null when nothing is configured (caller surfaces a clean error).
+   */
+  private async getAlpacaCreds(userId: string): Promise<{ apiKeyId: string; secretKey: string } | null> {
+    let apiKeyId = '';
+    let secretKey = '';
+    if (userId) {
+      try {
+        const doc = await this.db
+          .collection('users').doc(userId)
+          .collection('secrets').doc('apiKeys').get();
+        if (doc.exists) {
+          const data: any = doc.data() || {};
+          apiKeyId = data.alpacaApiKeyId || '';
+          secretKey = data.alpacaSecretKey || '';
+        }
+      } catch {}
+      if (!apiKeyId || !secretKey) {
+        try {
+          const snap = await this.db
+            .collection('users').doc(userId)
+            .collection('brokerConfigs')
+            .where('brokerName', '==', 'alpaca')
+            .limit(1).get();
+          if (!snap.empty) {
+            const data: any = snap.docs[0].data() || {};
+            apiKeyId = apiKeyId || data.apiKey || '';
+            secretKey = secretKey || data.apiSecret || '';
+          }
+        } catch {}
+      }
+    }
+    apiKeyId = apiKeyId || process.env.ALPACA_API_KEY_ID || '';
+    secretKey = secretKey || process.env.ALPACA_SECRET_KEY || '';
+    if (!apiKeyId || !secretKey) return null;
+    return { apiKeyId, secretKey };
+  }
+
+  /**
+   * Quick "is US equity market open?" check. Returns null when Alpaca
+   * creds aren't configured or the request fails — caller treats null
+   * as "unknown, default to closed/skip".
+   */
+  async isUSMarketOpen(userId: string): Promise<boolean | null> {
+    const creds = await this.getAlpacaCreds(userId);
+    if (!creds) return null;
+    try {
+      const alpaca = new AlpacaConnector({ ...creds, paper: true });
+      const clock = await alpaca.getClock();
+      return clock.is_open;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Scan US equities via Alpaca. Momentum-only scoring (no multi-timeframe
+   * TA yet — that lands in a follow-up after `TechnicalAnalysisEngine` is
+   * made source-agnostic). Returns the same ScanSummary shape as `scan()`
+   * so downstream consumers (JarvisBrain UI, agent swarm Scout) treat
+   * stocks and crypto uniformly.
+   *
+   * Off-hours behavior: Alpaca still serves the most recent snapshot when
+   * the market is closed, so the scan returns last-session data with the
+   * `marketSentiment` field tagged accordingly.
+   */
+  async scanStocks(userId: string): Promise<ScanSummary> {
+    console.log(`[SCANNER] 🔍 Scanning ${STOCK_SCAN_PAIRS.length} US equities via Alpaca...`);
+
+    const creds = await this.getAlpacaCreds(userId);
+    if (!creds) {
+      throw new Error('Alpaca credentials not configured. Add them under Broker Settings or set ALPACA_API_KEY_ID / ALPACA_SECRET_KEY in .env.');
+    }
+    const alpaca = new AlpacaConnector({ ...creds, paper: true });
+
+    let isOpen = false;
+    try {
+      const clock = await alpaca.getClock();
+      isOpen = clock.is_open;
+    } catch {}
+
+    // Batched snapshot call — Alpaca returns latestTrade + dailyBar + prevDailyBar
+    // for every symbol in one request. Falls back to per-symbol getQuote on failure.
+    const symbolsParam = encodeURIComponent(STOCK_SCAN_PAIRS.join(','));
+    let snapshots: Record<string, any> = {};
+    try {
+      const res = await fetch(`https://data.alpaca.markets/v2/stocks/snapshots?symbols=${symbolsParam}`, {
+        headers: {
+          'APCA-API-KEY-ID': creds.apiKeyId,
+          'APCA-API-SECRET-KEY': creds.secretKey,
+        },
+      });
+      if (!res.ok) throw new Error(`snapshots ${res.status}`);
+      snapshots = await res.json();
+    } catch (err: any) {
+      console.error('[SCANNER] Alpaca snapshots failed:', err.message);
+    }
+
+    const results: ScanResult[] = [];
+    for (const symbol of STOCK_SCAN_PAIRS) {
+      const snap = snapshots[symbol];
+      if (!snap) continue;
+      const lastTradePrice = snap.latestTrade?.p ?? snap.dailyBar?.c;
+      const daily = snap.dailyBar;
+      const prev = snap.prevDailyBar;
+      if (!lastTradePrice || !daily) continue;
+
+      const open = daily.o ?? prev?.c ?? lastTradePrice;
+      const high = daily.h ?? lastTradePrice;
+      const low = daily.l ?? lastTradePrice;
+      const volume = daily.v ?? 0;
+      const refClose = prev?.c ?? open;
+      const change24h = refClose ? ((lastTradePrice - refClose) / refClose) * 100 : 0;
+      const volatility = lastTradePrice ? ((high - low) / lastTradePrice) * 100 : 0;
+
+      // Momentum-only score until TA is available for stocks.
+      let score = 50 + change24h * 3;
+      if (volume > 50_000_000) score += 5;
+      if (volatility > 1 && volatility < 5) score += 3;
+      score = Math.max(0, Math.min(100, Math.round(score)));
+
+      results.push({
+        symbol,
+        price: lastTradePrice,
+        change24h: parseFloat(change24h.toFixed(2)),
+        volume24h: volume,
+        high24h: high,
+        low24h: low,
+        momentum: this.getMomentum(change24h),
+        volatility: parseFloat(volatility.toFixed(2)),
+        score,
+        confluence: change24h > 1 ? 'buy' : change24h < -1 ? 'sell' : 'neutral',
+      });
+    }
+
+    results.sort((a, b) => b.score - a.score);
+
+    const bullish = results.filter(r => r.confluence === 'buy').length;
+    const bearish = results.filter(r => r.confluence === 'sell').length;
+    const neutral = results.length - bullish - bearish;
+
+    let marketSentiment = isOpen ? 'Mixed' : 'Closed';
+    if (isOpen) {
+      if (bullish > bearish * 2) marketSentiment = 'Bullish 🟢';
+      else if (bearish > bullish * 2) marketSentiment = 'Bearish 🔴';
+      else if (bullish > bearish) marketSentiment = 'Slightly Bullish 🟡';
+      else if (bearish > bullish) marketSentiment = 'Slightly Bearish 🟠';
+    }
+
+    const summary: ScanSummary = {
+      timestamp: new Date().toISOString(),
+      totalPairs: results.length,
+      bullish,
+      bearish,
+      neutral,
+      topOpportunities: results.slice(0, 5),
+      marketSentiment,
+      allResults: results,
+    };
+
+    console.log(`[SCANNER] ✅ Stock scan complete: ${bullish} bullish, ${bearish} bearish, ${neutral} neutral (market ${isOpen ? 'OPEN' : 'CLOSED'})`);
     return summary;
   }
 

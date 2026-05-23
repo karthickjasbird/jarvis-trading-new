@@ -1193,6 +1193,41 @@ async function startServer() {
     }
   });
 
+  // Trigger a stock scan via Alpaca (Phase 8.2)
+  app.post("/api/scanner/scan-stocks", async (_req, res) => {
+    try {
+      const ownerId = getOwnerId();
+      if (!ownerId) return res.status(400).json({ error: 'OWNER_USER_ID not set yet — sign in first.' });
+      const result = await marketScanner.scanStocks(ownerId);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // --- ALPACA SMOKE TEST ---
+  // Quick "is the connector wired?" check. GETs Alpaca's market clock —
+  // also tells you whether US equities are currently tradable.
+  app.get("/api/alpaca/clock", async (_req, res) => {
+    try {
+      const ownerId = getOwnerId();
+      if (!ownerId) return res.status(400).json({ error: 'OWNER_USER_ID not set yet — sign in first.' });
+      const { AlpacaConnector } = await import('./engine/alpacaConnector.ts');
+      const doc = await db.collection('users').doc(ownerId).collection('secrets').doc('apiKeys').get();
+      const data: any = doc.exists ? (doc.data() || {}) : {};
+      const apiKeyId = data.alpacaApiKeyId || process.env.ALPACA_API_KEY_ID || '';
+      const secretKey = data.alpacaSecretKey || process.env.ALPACA_SECRET_KEY || '';
+      if (!apiKeyId || !secretKey) {
+        return res.status(400).json({ error: 'Alpaca credentials not configured. Add them under Broker Settings or set ALPACA_API_KEY_ID / ALPACA_SECRET_KEY in .env.' });
+      }
+      const alpaca = new AlpacaConnector({ apiKeyId, secretKey, paper: true });
+      const clock = await alpaca.getClock();
+      res.json(clock);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- KELLY POSITION SIZING ROUTES ---
 
   // Get full Kelly report for a user

@@ -26,6 +26,7 @@ const BROKERS = [
   { id: 'upstox', name: 'Upstox', type: 'indian_equity' },
   { id: 'binance', name: 'Binance', type: 'crypto' },
   { id: 'bybit', name: 'Bybit', type: 'crypto' },
+  { id: 'alpaca', name: 'Alpaca (US Stocks + Commodity ETFs)', type: 'us_equity' },
   { id: 'paper', name: 'Paper Trading (Simulator)', type: 'simulator' }
 ];
 

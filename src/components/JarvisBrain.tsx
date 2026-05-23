@@ -623,7 +623,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
 
   const triggerScan = async () => {
     setScanning(true);
-    toast.loading('🔍 Scanning 20 pairs...', { id: 'scan' });
+    toast.loading('🔍 Scanning markets...', { id: 'scan' });
     try {
       const res = await fetch('/api/scanner/scan', { method: 'POST' });
       const data = await res.json();

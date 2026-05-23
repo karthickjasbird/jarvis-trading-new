@@ -17,6 +17,30 @@
 import { sendTelegramNotification } from './telegram.ts';
 import { RegimeDetector, RegimeResult } from './regimeDetector.ts';
 import { KellyCalculator } from './kellyCalculator.ts';
+import { detectAssetClass } from './alpacaConnector.ts';
+
+/**
+ * Strategy profile picked by the deadline router (Phase 8.5). Maps a
+ * campaign's remaining time-to-deadline onto:
+ *   - which asset classes to scan (crypto / stocks / commodities)
+ *   - which timeframe regime/TA should focus on
+ *   - a Kelly multiplier (lever Kelly up for short deadlines, down for long)
+ *   - a minimum score threshold for candidate inclusion
+ *
+ * Buckets (deadline-driven):
+ *   scalp     <6h           crypto-only (24/7), 1H, Kelly ×1.3
+ *   day       6h-3d         crypto + stocks (when US session open), 1H/4H, Kelly ×1.0-1.15
+ *   swing     3-14d         crypto + stocks + commodities, 4H, Kelly ×0.9
+ *   position  >14d          all classes, 1D, Kelly ×0.8
+ */
+export interface StrategyProfile {
+  bucket: 'scalp' | 'day' | 'swing' | 'position';
+  markets: Array<'crypto' | 'stocks' | 'commodities'>;
+  regimeTimeframe: '1h' | '4h' | '1d';
+  kellyMultiplier: number;
+  minScore: number;
+  reason: string;
+}
 
 export interface Campaign {
   id?: string;
@@ -166,7 +190,76 @@ export class GoalExecutor {
   }
 
   /**
-   * Scan market and deploy capital into available slots
+   * Deadline-Aware Strategy Router (Phase 8.5).
+   *
+   * Less time = quick profit / more time = more profit. Picks which
+   * markets to scan, what timeframe to focus on, and how aggressively
+   * to lever Kelly sizing based on time-to-deadline.
+   *
+   * Stock markets are only included when we have a positive signal that
+   * US equities are tradable right now (so we don't burn slots on tickers
+   * the executor would reject for being out-of-session).
+   */
+  private resolveStrategy(deadline: Date | string, stockMarketOpen: boolean | null): StrategyProfile {
+    const deadlineDate = typeof deadline === 'string' ? new Date(deadline) : deadline;
+    const hoursLeft = (deadlineDate.getTime() - Date.now()) / (1000 * 60 * 60);
+    const stocksOk = stockMarketOpen === true;
+
+    if (hoursLeft < 6) {
+      return {
+        bucket: 'scalp',
+        markets: ['crypto'],
+        regimeTimeframe: '1h',
+        kellyMultiplier: 1.3,
+        minScore: 55,
+        reason: `<6h to deadline (${hoursLeft.toFixed(1)}h) — scalp crypto on 1H, Kelly ×1.3`,
+      };
+    }
+    if (hoursLeft < 24) {
+      return {
+        bucket: 'day',
+        markets: stocksOk ? ['crypto', 'stocks'] : ['crypto'],
+        regimeTimeframe: '1h',
+        kellyMultiplier: 1.15,
+        minScore: 60,
+        reason: `<24h (${hoursLeft.toFixed(1)}h) — day-trade crypto${stocksOk ? ' + stocks' : ' (US closed)'}, 1H TF, Kelly ×1.15`,
+      };
+    }
+    if (hoursLeft < 24 * 3) {
+      return {
+        bucket: 'day',
+        markets: stocksOk ? ['crypto', 'stocks'] : ['crypto'],
+        regimeTimeframe: '4h',
+        kellyMultiplier: 1.0,
+        minScore: 65,
+        reason: `1-3 days (${(hoursLeft / 24).toFixed(1)}d) — day-trade crypto${stocksOk ? ' + stocks' : ' (US closed)'}, 4H TF, standard Kelly`,
+      };
+    }
+    if (hoursLeft < 24 * 14) {
+      return {
+        bucket: 'swing',
+        markets: stocksOk ? ['crypto', 'stocks', 'commodities'] : ['crypto'],
+        regimeTimeframe: '4h',
+        kellyMultiplier: 0.9,
+        minScore: 65,
+        reason: `3-14 days (${(hoursLeft / 24).toFixed(1)}d) — swing diversified${stocksOk ? ' across all classes' : ' (crypto-only while US closed)'}, 4H TF, Kelly ×0.9`,
+      };
+    }
+    return {
+      bucket: 'position',
+      markets: stocksOk ? ['crypto', 'stocks', 'commodities'] : ['crypto'],
+      regimeTimeframe: '1d',
+      kellyMultiplier: 0.8,
+      minScore: 70,
+      reason: `>14 days (${(hoursLeft / 24).toFixed(1)}d) — position trade${stocksOk ? ', all classes' : ' (crypto-only while US closed)'}, 1D TF, Kelly ×0.8`,
+    };
+  }
+
+  /**
+   * Scan market and deploy capital into available slots.
+   *
+   * Phase 8.5: market selection, timeframe, and Kelly multiplier are now
+   * resolved by `resolveStrategy()` from the campaign's remaining deadline.
    */
   async scanAndDeploy(campaign: Campaign): Promise<void> {
     if (campaign.status !== 'active') return;
@@ -193,6 +286,12 @@ export class GoalExecutor {
     // Update urgency
     campaign.urgency = this.calculateUrgency(campaign.deadline);
 
+    // Resolve deadline-aware strategy profile. Stock-market clock is gated
+    // here so we only burn scan budget on tradable markets.
+    const stockOpen = await this.marketScanner.isUSMarketOpen?.(campaign.userId) ?? null;
+    const strategy = this.resolveStrategy(campaign.deadline, stockOpen);
+    await this.logBrainActivity(campaign.userId, `🧭 STRATEGY: ${strategy.bucket.toUpperCase()} — ${strategy.reason}`);
+
     // Calculate capital per slot
     const totalAvailable = campaign.availableCapital;
     if (totalAvailable < 10) {
@@ -201,45 +300,93 @@ export class GoalExecutor {
     }
     const capitalPerSlot = totalAvailable / Math.min(openSlots, 3);
 
-    // Scan market
-    console.log(`[CAMPAIGN ${campaign.id}] 🔍 Scanning for ${openSlots} trade slots ($${capitalPerSlot.toFixed(0)}/slot)...`);
-    const scanResult = await this.marketScanner.scan();
-
-    // Filter for bullish opportunities with decent scores
-    const minScore = campaign.urgency === 'critical' ? 55 : campaign.urgency === 'urgent' ? 60 : 65;
-    const candidates = scanResult.topOpportunities.filter(
-      (opp: any) => (opp.confluence === 'buy' || opp.confluence === 'strong_buy' || opp.score >= minScore)
-        && !campaign.activeTradeIds.some((id: string) => {
-          const activeTrade = campaign.tradeLog.find(t => t.tradeId === id);
-          return activeTrade && activeTrade.symbol === opp.symbol;
-        })
+    // Gather candidates across the markets the strategy router selected.
+    console.log(`[CAMPAIGN ${campaign.id}] 🔍 Scanning ${strategy.markets.join('+')} for ${openSlots} slots ($${capitalPerSlot.toFixed(0)}/slot)...`);
+    const candidates: any[] = [];
+    const activeSymbols = new Set(
+      campaign.tradeLog.filter(t => t.status === 'open').map(t => t.symbol)
     );
 
+    if (strategy.markets.includes('crypto')) {
+      try {
+        const cryptoScan = await this.marketScanner.scan();
+        for (const opp of (cryptoScan.topOpportunities || [])) {
+          if (activeSymbols.has(opp.symbol)) continue;
+          if (opp.score < strategy.minScore) continue;
+          if (opp.confluence !== 'buy' && opp.confluence !== 'strong_buy') continue;
+          candidates.push(opp);
+        }
+      } catch (err: any) {
+        console.error(`[CAMPAIGN ${campaign.id}] Crypto scan failed:`, err.message);
+      }
+    }
+
+    const needStocks = strategy.markets.includes('stocks') || strategy.markets.includes('commodities');
+    if (needStocks) {
+      try {
+        const stockScan = await this.marketScanner.scanStocks(campaign.userId);
+        const wantCommoditiesOnly = strategy.markets.includes('commodities') && !strategy.markets.includes('stocks');
+        const COMMODITY_SET = new Set(['GLD', 'SLV', 'USO', 'UNG', 'DBA', 'COPX']);
+        for (const opp of (stockScan.allResults || [])) {
+          if (activeSymbols.has(opp.symbol)) continue;
+          if (opp.score < strategy.minScore) continue;
+          if (opp.confluence !== 'buy' && opp.confluence !== 'strong_buy') continue;
+          const isCommodity = COMMODITY_SET.has(opp.symbol);
+          if (wantCommoditiesOnly && !isCommodity) continue;
+          // If only "stocks" requested but not "commodities", drop the ETFs to avoid double-counting.
+          if (strategy.markets.includes('stocks') && !strategy.markets.includes('commodities') && isCommodity) continue;
+          candidates.push(opp);
+        }
+      } catch (err: any) {
+        console.error(`[CAMPAIGN ${campaign.id}] Stock scan failed:`, err.message);
+      }
+    }
+
+    // Sort merged candidates by score descending so the best across all
+    // selected markets bubbles to the top.
+    candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+
     if (candidates.length === 0) {
-      console.log(`[CAMPAIGN ${campaign.id}] No qualified opportunities (min score: ${minScore}). Will retry next scan.`);
+      console.log(`[CAMPAIGN ${campaign.id}] No qualified opportunities (min score: ${strategy.minScore}, markets: ${strategy.markets.join('+')}). Will retry next scan.`);
       campaign.lastScanAt = new Date().toISOString();
       await this.saveCampaign(campaign);
       return;
     }
+
+    // Default-neutral regime fallback for stocks/commodities (Binance-based
+    // regime detector doesn't apply to US equities yet).
+    const neutralRec = {
+      shouldTrade: true,
+      positionSizeMultiplier: 1.0,
+      stopLossMultiplier: 1.0,
+      takeProfitMultiplier: 1.0,
+    };
 
     // Deploy into available slots
     const deployCount = Math.min(openSlots, candidates.length);
     for (let i = 0; i < deployCount; i++) {
       const opp = candidates[i];
       const slotCapital = capitalPerSlot;
+      const assetClass = detectAssetClass(opp.symbol);
 
       try {
-        // Detect regime for this specific coin before deploying
-        const regime = await this.regimeDetector.detectRegime(opp.symbol, '4h');
-        const rec = regime.recommendations;
-
-        // Skip if regime says don't trade
-        if (!rec.shouldTrade) {
-          console.log(`[CAMPAIGN ${campaign.id}] ⚠️ Skipping ${opp.symbol} — regime: ${regime.regime} (${rec.reason})`);
-          await this.logBrainActivity(campaign.userId,
-            `⚠️ REGIME SKIP: ${opp.symbol} is ${regime.regime} — ${rec.reason}`
-          );
-          continue;
+        // Regime detection only for crypto (uses Binance candles). For
+        // stocks we use neutral defaults until TA goes source-agnostic.
+        let regimeName = 'n/a';
+        let regimeConfidence = 0.6;
+        let rec: any = neutralRec;
+        if (assetClass === 'crypto') {
+          const regime = await this.regimeDetector.detectRegime(opp.symbol, strategy.regimeTimeframe);
+          regimeName = regime.regime;
+          regimeConfidence = regime.confidence;
+          rec = regime.recommendations;
+          if (!rec.shouldTrade) {
+            console.log(`[CAMPAIGN ${campaign.id}] ⚠️ Skipping ${opp.symbol} — regime: ${regime.regime} (${rec.reason})`);
+            await this.logBrainActivity(campaign.userId,
+              `⚠️ REGIME SKIP: ${opp.symbol} is ${regime.regime} — ${rec.reason}`
+            );
+            continue;
+          }
         }
 
         // Calculate dynamic TP based on remaining target and urgency
@@ -249,26 +396,30 @@ export class GoalExecutor {
 
         // Get fresh price
         const price = opp.price;
-        // Use Kelly-optimal position sizing instead of equal splitting
+        // Kelly-optimal sizing × strategy multiplier × regime multiplier.
         const kellyResult = await this.kellyCalculator.getOptimalPositionSize(
           campaign.userId,
           campaign.availableCapital,
           opp.symbol,
-          regime.confidence
+          regimeConfidence
         );
-        // Apply regime multiplier on top of Kelly sizing
-        const adjustedCapital = Math.min(kellyResult.size * rec.positionSizeMultiplier, slotCapital);
+        const adjustedCapital = Math.min(
+          kellyResult.size * rec.positionSizeMultiplier * strategy.kellyMultiplier,
+          slotCapital
+        );
         const quantity = adjustedCapital / price;
         const takeProfitPrice = price + ((tpPerTrade * rec.takeProfitMultiplier) / quantity);
-        
+
         // Dynamic stop loss: regime-adjusted + urgency-adjusted
         const baseSl = campaign.urgency === 'critical' ? 0.015 : campaign.urgency === 'urgent' ? 0.02 : 0.025;
         const stopLossPrice = price * (1 - (baseSl * rec.stopLossMultiplier));
 
-        // Execute trade
+        // Execute trade — tag the market so tradeExecutor routes the
+        // order to the right broker (Alpaca for stocks, ccxt for crypto).
         const result = await this.tradeExecutor.execute({
           userId: campaign.userId,
           symbol: opp.symbol,
+          market: assetClass,
           side: 'buy',
           quantity,
           mode: 'sentry',
@@ -301,10 +452,10 @@ export class GoalExecutor {
         });
 
         await this.logBrainActivity(campaign.userId,
-          `🚀 CAMPAIGN TRADE: ${opp.symbol} — $${adjustedCapital.toFixed(0)} deployed (Kelly: ${(kellyResult.fraction * 100).toFixed(1)}%, regime: ${regime.regime}, slot ${campaign.activeTradeIds.length}/${campaign.maxSlots}). TP: $${takeProfitPrice.toFixed(2)} | SL: $${stopLossPrice.toFixed(2)}`
+          `🚀 CAMPAIGN TRADE [${strategy.bucket}/${assetClass}]: ${opp.symbol} — $${adjustedCapital.toFixed(0)} deployed (Kelly: ${(kellyResult.fraction * 100).toFixed(1)}% × ${strategy.kellyMultiplier}, regime: ${regimeName}, slot ${campaign.activeTradeIds.length}/${campaign.maxSlots}). TP: $${takeProfitPrice.toFixed(2)} | SL: $${stopLossPrice.toFixed(2)}`
         );
 
-        console.log(`[CAMPAIGN ${campaign.id}] ✅ Deployed $${slotCapital.toFixed(0)} into ${opp.symbol} @ $${price}`);
+        console.log(`[CAMPAIGN ${campaign.id}] ✅ Deployed $${slotCapital.toFixed(0)} into ${opp.symbol} (${assetClass}) @ $${price}`);
 
       } catch (err: any) {
         console.error(`[CAMPAIGN ${campaign.id}] Failed to deploy into ${opp.symbol}:`, err.message);

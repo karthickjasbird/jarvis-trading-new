@@ -1,6 +1,7 @@
 import ccxt from 'ccxt';
 import { KiteConnect } from 'kiteconnect';
 import { sendTelegramNotification } from './telegram.ts';
+import { AlpacaConnector, detectAssetClass } from './alpacaConnector.ts';
 
 export class TradeExecutor {
   private db: FirebaseFirestore.Firestore;
@@ -9,6 +10,87 @@ export class TradeExecutor {
   constructor(db: any, marketState: any) {
     this.db = db;
     this.marketState = marketState;
+  }
+
+  /**
+   * Resolve which asset class a trade params object refers to.
+   * Explicit `market` field wins; otherwise infer from symbol shape.
+   */
+  private resolveAssetClass(market: string | undefined, symbol: string): 'crypto' | 'stock' {
+    if (market === 'stock' || market === 'stocks' || market === 'equity') return 'stock';
+    if (market === 'crypto') return 'crypto';
+    return detectAssetClass(symbol);
+  }
+
+  /**
+   * Read this user's Alpaca creds. Look-up order:
+   *   1. `users/{userId}/secrets/apiKeys` (personal API keys vault)
+   *   2. `users/{userId}/brokerConfigs` with brokerName === 'alpaca'
+   *      (set via Broker Settings)
+   *   3. `.env` fallback
+   * Symmetric with `marketScanner.getAlpacaCreds`.
+   */
+  private async getAlpacaConnector(userId: string, isPaper: boolean): Promise<AlpacaConnector> {
+    let apiKeyId = '';
+    let secretKey = '';
+    try {
+      const doc = await this.db
+        .collection('users').doc(userId)
+        .collection('secrets').doc('apiKeys').get();
+      if (doc.exists) {
+        const data: any = doc.data() || {};
+        apiKeyId = data.alpacaApiKeyId || '';
+        secretKey = data.alpacaSecretKey || '';
+      }
+    } catch {}
+    if (!apiKeyId || !secretKey) {
+      try {
+        const snap = await this.db
+          .collection('users').doc(userId)
+          .collection('brokerConfigs')
+          .where('brokerName', '==', 'alpaca')
+          .limit(1).get();
+        if (!snap.empty) {
+          const data: any = snap.docs[0].data() || {};
+          apiKeyId = apiKeyId || data.apiKey || '';
+          secretKey = secretKey || data.apiSecret || '';
+        }
+      } catch {}
+    }
+    apiKeyId = apiKeyId || process.env.ALPACA_API_KEY_ID || '';
+    secretKey = secretKey || process.env.ALPACA_SECRET_KEY || '';
+    if (!apiKeyId || !secretKey) {
+      throw new Error('Alpaca credentials not configured. Add them under Broker Settings or set ALPACA_API_KEY_ID / ALPACA_SECRET_KEY in .env.');
+    }
+    return new AlpacaConnector({ apiKeyId, secretKey, paper: isPaper });
+  }
+
+  /**
+   * Fetch a fill-quality price for paper trades. Crypto → public Binance
+   * ticker; stocks → Alpaca latest trade. Returns null on failure so the
+   * caller can fall back to last known marketState.
+   */
+  private async fetchMarketPrice(
+    symbol: string,
+    assetClass: 'crypto' | 'stock',
+    userId: string,
+    isPaper: boolean,
+  ): Promise<number | null> {
+    try {
+      if (assetClass === 'stock') {
+        const alpaca = await this.getAlpacaConnector(userId, isPaper);
+        const quote = await alpaca.getQuote(symbol);
+        return quote.price;
+      }
+      const cleanSymbol = (symbol || '').replace('/', '');
+      if (!cleanSymbol) return null;
+      const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`);
+      const data = await res.json();
+      const price = parseFloat(data.price);
+      return isNaN(price) ? null : price;
+    } catch {
+      return null;
+    }
   }
 
   private async getOrCreatePortfolio(userId: string) {
@@ -70,27 +152,39 @@ export class TradeExecutor {
 
   async execute(params: any) {
     const { userId, symbol, side, quantity, market, mode, isPractice, stopLossPrice, takeProfitPrice, trailingStopDistance, profitTarget } = params;
-    
-    // Fetch REAL price from Binance for accurate fill pricing
-    let price = this.marketState[symbol]?.price || 100;
-    try {
-      const cleanSymbol = (symbol || '').replace('/', '');
-      if (cleanSymbol) {
-        const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`);
-        const data = await res.json();
-        const binancePrice = parseFloat(data.price);
-        if (binancePrice && !isNaN(binancePrice)) {
-          price = binancePrice;
-          // Update marketState with real price
-          if (this.marketState[symbol]) {
-            this.marketState[symbol].price = binancePrice;
-          } else {
-            this.marketState[symbol] = { price: binancePrice, lastChange: 0 };
-          }
+
+    const assetClass = this.resolveAssetClass(market, symbol);
+
+    // Stocks can only trade during market hours — bail early with a clear
+    // message rather than letting Alpaca reject the order downstream.
+    if (assetClass === 'stock') {
+      try {
+        const alpaca = await this.getAlpacaConnector(userId, isPractice !== false);
+        const clock = await alpaca.getClock();
+        if (!clock.is_open) {
+          throw new Error(`US equity market is closed. Next open: ${clock.next_open}`);
         }
+      } catch (err: any) {
+        // Re-throw market-closed errors, but swallow auth/network so the
+        // caller still gets a sensible execution error rather than a
+        // surprise "credentials missing" partway through.
+        if (/market is closed/i.test(err?.message || '')) throw err;
+        throw new Error(`Alpaca pre-trade check failed: ${err.message}`);
       }
-    } catch {}
-    
+    }
+
+    // Fetch REAL price for accurate fill pricing (Binance for crypto, Alpaca for stocks)
+    let price = this.marketState[symbol]?.price || 100;
+    const fetched = await this.fetchMarketPrice(symbol, assetClass, userId, isPractice !== false);
+    if (fetched) {
+      price = fetched;
+      if (this.marketState[symbol]) {
+        this.marketState[symbol].price = fetched;
+      } else {
+        this.marketState[symbol] = { price: fetched, lastChange: 0 };
+      }
+    }
+
     // Apply Risk Management Guardrails
     await this.checkRiskManagement(userId, Number(quantity), price);
 
@@ -148,12 +242,23 @@ export class TradeExecutor {
             secret: brokerConfig.apiSecret,
             enableRateLimit: true,
           });
-          
+
           // LIVE MODE: Never use sandbox — user has explicitly switched to live/real money
 
           const order = await exchange.createMarketOrder(symbol, side, executedQuantity);
           orderId = order.id;
           fillPrice = order.average || order.price || price;
+          executedQuantity = order.filled || executedQuantity;
+        } else if (brokerConfig.brokerName === 'alpaca') {
+          // brokerConfig.apiKey = Alpaca key ID, apiSecret = secret key.
+          const alpaca = new AlpacaConnector({
+            apiKeyId: brokerConfig.apiKey,
+            secretKey: brokerConfig.apiSecret,
+            paper: false,
+          });
+          const order = await alpaca.createMarketOrder(symbol, side, executedQuantity);
+          orderId = order.id;
+          fillPrice = order.average ?? price;
           executedQuantity = order.filled || executedQuantity;
         } else {
           throw new Error(`Unsupported live broker: ${brokerConfig.brokerName}`);
@@ -168,7 +273,7 @@ export class TradeExecutor {
     const trade = {
       userId,
       symbol,
-      market: market || 'crypto',
+      market: market || assetClass,
       side,
       quantity: executedQuantity,
       entryPrice: fillPrice,
@@ -235,7 +340,11 @@ export class TradeExecutor {
     if (data.userId !== userId) throw new Error("Unauthorized");
     if (data.status !== 'open') throw new Error("Trade already closed");
 
+    const closeAssetClass = this.resolveAssetClass(data.market, data.symbol);
     let currentPrice = this.marketState[data.symbol]?.price || data.entryPrice;
+    const fetched = await this.fetchMarketPrice(data.symbol, closeAssetClass, userId, data.isPractice !== false);
+    if (fetched) currentPrice = fetched;
+
     let exitOrderId = `paper-close-${Date.now()}`;
 
     if (!data.isPractice) {  // isPractice is the single source of truth for real vs paper
@@ -249,7 +358,7 @@ export class TradeExecutor {
             if (!brokerConfig.accessToken) throw new Error("Zerodha access token missing.");
             const kc = new KiteConnect({ api_key: brokerConfig.apiKey });
             kc.setAccessToken(brokerConfig.accessToken);
-            
+
             const order = await kc.placeOrder("regular", {
               exchange: "NSE",
               tradingsymbol: data.symbol,
@@ -266,12 +375,21 @@ export class TradeExecutor {
               secret: brokerConfig.apiSecret,
               enableRateLimit: true,
             });
-            
+
             // LIVE MODE: Never use sandbox — user has explicitly switched to live/real money
 
             const order = await exchange.createMarketOrder(data.symbol, closeSide, data.quantity);
             exitOrderId = order.id;
             currentPrice = order.average || order.price || currentPrice;
+          } else if (brokerConfig.brokerName === 'alpaca') {
+            const alpaca = new AlpacaConnector({
+              apiKeyId: brokerConfig.apiKey,
+              secretKey: brokerConfig.apiSecret,
+              paper: false,
+            });
+            const order = await alpaca.createMarketOrder(data.symbol, closeSide, data.quantity);
+            exitOrderId = order.id;
+            currentPrice = order.average ?? currentPrice;
           }
         } catch (error: any) {
           console.error("Live close execution failed:", error);
@@ -347,16 +465,10 @@ export class TradeExecutor {
     const remainingQuantity = data.quantity - closeQuantity;
 
     // Fetch current price
+    const partialAssetClass = this.resolveAssetClass(data.market, data.symbol);
     let currentPrice = this.marketState[data.symbol]?.price || data.entryPrice;
-    try {
-      const cleanSymbol = (data.symbol || '').replace('/', '');
-      if (cleanSymbol) {
-        const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${cleanSymbol}`);
-        const priceData = await res.json();
-        const binancePrice = parseFloat(priceData.price);
-        if (binancePrice && !isNaN(binancePrice)) currentPrice = binancePrice;
-      }
-    } catch {}
+    const fetched = await this.fetchMarketPrice(data.symbol, partialAssetClass, userId, data.isPractice !== false);
+    if (fetched) currentPrice = fetched;
 
     let exitOrderId = `paper-partial-${Date.now()}`;
 
@@ -377,6 +489,15 @@ export class TradeExecutor {
             const order = await exchange.createMarketOrder(data.symbol, closeSide, closeQuantity);
             exitOrderId = order.id;
             currentPrice = order.average || order.price || currentPrice;
+          } else if (brokerConfig.brokerName === 'alpaca') {
+            const alpaca = new AlpacaConnector({
+              apiKeyId: brokerConfig.apiKey,
+              secretKey: brokerConfig.apiSecret,
+              paper: false,
+            });
+            const order = await alpaca.createMarketOrder(data.symbol, closeSide, closeQuantity);
+            exitOrderId = order.id;
+            currentPrice = order.average ?? currentPrice;
           }
         } catch (error: any) {
           console.error("Live partial close failed:", error);

@@ -2,6 +2,31 @@
 
 All notable changes to Jarvis Trading Platform will be documented in this file.
 
+## [1.4.0] - 2026-05-23
+
+### Project NEXUS — Phase 8: Multi-Market Expansion
+
+### Added
+- **Alpaca Connector (`engine/alpacaConnector.ts`)** — REST client for US stocks and commodity ETFs (paper + live). Mirrors ccxt's `createMarketOrder` return shape so the trade executor's broker switch stays symmetric. Methods: `getClock` (market open/close), `getQuote` (latest trade + bid/ask), `getBars` (OHLCV), `placeMarketOrder` / `createMarketOrder`, `getPosition`, `closePosition`, `getAccount`. Paper vs live decided by the existing `isPractice` flag.
+- **Stock + commodity scanner** — `STOCK_SCAN_PAIRS` adds 33 US tickers across mega-cap tech, semis, SaaS, finance, consumer, index ETFs (SPY/QQQ/IWM/DIA) and 6 commodity ETFs (GLD, SLV, USO, UNG, DBA, COPX). `marketScanner.scanStocks(userId)` uses Alpaca batched snapshots and returns the same `ScanSummary` shape as the crypto scan.
+- **Crypto scanner growth** — `SCAN_PAIRS` expanded from 20 → 48 across L1, L2, DeFi, AI, Meme, RWA, Gaming, Utility, DEX/Oracle infra sectors.
+- **Asset-class tabs on MarketWatchlist** — 🪙 Crypto / 📈 Stocks / 🛢️ Commodities. Switching swaps the data source and resets the table immediately.
+- **Market-hours badge** — pulsing green "MARKET OPEN" / gray "MARKET CLOSED" pill on the stocks and commodities tabs, fed by `/api/alpaca/clock` polled every 60s.
+- **Alpaca in Broker Settings** — added to the broker dropdown ("Alpaca (US Stocks + Commodity ETFs)"). The same `apiKey` + `apiSecret` form is reused; both the scanner and trade executor fall back through personal secrets vault → brokerConfigs → `.env`.
+- **Asset-class routing in `tradeExecutor`** — `alpaca` case added in execute/closePosition/partialClose. Trades now carry a `market: 'crypto' | 'stock'` field derived from explicit param or symbol shape. Stock orders pre-check Alpaca's market clock and refuse cleanly when US session is closed.
+- **Deadline-Aware Strategy Router (`engine/goalExecutor.ts`)** — `StrategyProfile` + `resolveStrategy()` map a campaign's remaining time-to-deadline to one of 4 buckets:
+  - `scalp` (<6h): crypto only, 1H timeframe, Kelly ×1.3, min score 55
+  - `day` (6h-3d): + stocks when US open, 1H/4H timeframe, Kelly ×1.0–1.15
+  - `swing` (3-14d): + commodities, 4H, Kelly ×0.9
+  - `position` (>14d): all classes, 1D, Kelly ×0.8
+  `scanAndDeploy` rewritten to gather candidates across selected markets, sort merged by score, skip Binance-only regime detection for stocks (uses neutral defaults), apply `strategy.kellyMultiplier` on top of Kelly + regime sizing, and tag each trade with `market` so the executor routes to the right broker.
+- **`/api/scanner/scan-stocks`** + **`/api/alpaca/clock`** — new endpoints (stock scan + connector smoke test).
+- **Self-awareness manifest sync** — `manifestGenerator.ts` updated so Jarvis knows about all 33 engines (descriptions for `alpacaConnector`, `tradeDiary`, `tradingViewBridge`, `tvIndicators`, `tvVision` filled in) and the `capabilities` narrative now covers multi-market trading, deadline router, TradingView Vision, and Trade Diary.
+
+### Known follow-ups
+- `TechnicalAnalysisEngine` is still Binance-only — stock scoring is momentum-only until TA goes source-agnostic.
+- Asset-class filter on `Dashboard.tsx` deferred (trade records already carry the `market` field; chip-set filter is trivial when first live stock positions appear).
+
 ## [1.1.0] - 2026-05-14
 
 ### Added

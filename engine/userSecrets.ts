@@ -12,6 +12,8 @@ export interface UserSecrets {
   binanceSecretKey?: string;
   telegramBotToken?: string;
   telegramChatId?: string;
+  alpacaApiKeyId?: string;
+  alpacaSecretKey?: string;
 }
 
 interface CacheEntry {
@@ -79,6 +81,24 @@ export class UserSecretsManager {
     return {
       apiKey: process.env.BINANCE_API_KEY || '',
       secret: process.env.BINANCE_SECRET_KEY || '',
+    };
+  }
+
+  /**
+   * Get Alpaca credentials — user's own key/secret, or fallback to .env.
+   * Paper-vs-live is decided by the trade's `isPractice` flag at execution
+   * time, not by the credential pair (a single Alpaca account works for both).
+   */
+  async getAlpacaCredentials(userId?: string): Promise<{ apiKeyId: string; secretKey: string }> {
+    if (userId) {
+      const secrets = await this.getSecrets(userId);
+      if (secrets.alpacaApiKeyId && secrets.alpacaSecretKey) {
+        return { apiKeyId: secrets.alpacaApiKeyId, secretKey: secrets.alpacaSecretKey };
+      }
+    }
+    return {
+      apiKeyId: process.env.ALPACA_API_KEY_ID || '',
+      secretKey: process.env.ALPACA_SECRET_KEY || '',
     };
   }
 
