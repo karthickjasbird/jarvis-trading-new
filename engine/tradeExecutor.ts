@@ -2,14 +2,21 @@ import ccxt from 'ccxt';
 import { KiteConnect } from 'kiteconnect';
 import { sendTelegramNotification } from './telegram.ts';
 import { AlpacaConnector, detectAssetClass } from './alpacaConnector.ts';
+import { RiskGate } from './riskGate.ts';
+import { MemoryManager } from './memory.ts';
+import { PostMortemEngine } from './postMortem.ts';
 
 export class TradeExecutor {
   private db: FirebaseFirestore.Firestore;
   private marketState: any;
+  private riskGate: RiskGate;
+  private memoryManager: MemoryManager | null;
 
-  constructor(db: any, marketState: any) {
+  constructor(db: any, marketState: any, riskGate: RiskGate, memoryManager: MemoryManager | null = null) {
     this.db = db;
     this.marketState = marketState;
+    this.riskGate = riskGate;
+    this.memoryManager = memoryManager;
   }
 
   /**
@@ -93,96 +100,8 @@ export class TradeExecutor {
     }
   }
 
-  private async getOrCreatePortfolio(userId: string) {
-    const ref = this.db.collection('portfolios').doc(userId);
-    const doc = await ref.get();
-    if (!doc.exists) {
-      const initial = {
-        userId,
-        paperBalance: 100000, // $100k starting balance
-        realizedPnl: 0,
-        updatedAt: new Date().toISOString()
-      };
-      await ref.set(initial);
-      return initial;
-    }
-    return doc.data();
-  }
-
-  private async checkRiskManagement(userId: string, quantity: number, price: number, isPractice: boolean = true) {
-    // Fetch global risk settings
-    let riskConfig: any = {
-      maxDailyLoss: 1000,
-      maxPositionSizePct: 20,
-      autoLiquidateThreshold: 500,
-      maxOpenPositions: 5,
-      maxLiveCapital: 50, // Default $50 hard cap on aggregate LIVE exposure
-    };
-
-    const riskDoc = await this.db.collection('riskSettings').doc(userId).get();
-    if (riskDoc.exists) {
-      riskConfig = { ...riskConfig, ...riskDoc.data() };
-    }
-
-    // 1. Check Max Daily Loss
-    const dailyPnl = await this.getDailyPnl(userId);
-    if (riskConfig.maxDailyLoss && dailyPnl.totalPnl <= -riskConfig.maxDailyLoss) {
-      throw new Error(`RISK LIMIT EXCEEDED: Daily loss limit of $${riskConfig.maxDailyLoss} reached.`);
-    }
-
-    // 2. Position Sizing
-    const portfolio = await this.getOrCreatePortfolio(userId);
-    const tradeValue = quantity * price;
-    const maxTradeValue = (portfolio?.paperBalance || 100000) * (riskConfig.maxPositionSizePct / 100);
-
-    if (tradeValue > maxTradeValue) {
-      throw new Error(`RISK LIMIT EXCEEDED: Trade value ($${tradeValue.toFixed(2)}) exceeds ${riskConfig.maxPositionSizePct}% of portfolio ($${maxTradeValue.toFixed(2)}).`);
-    }
-
-    // 3. Max Open Positions
-    if (riskConfig.maxOpenPositions && riskConfig.maxOpenPositions > 0) {
-      const openSnap = await this.db.collection('trades')
-        .where('userId', '==', userId)
-        .where('status', '==', 'open')
-        .get();
-      if (openSnap.size >= riskConfig.maxOpenPositions) {
-        throw new Error(`RISK LIMIT EXCEEDED: Already at max open positions (${openSnap.size}/${riskConfig.maxOpenPositions}).`);
-      }
-    }
-
-    // 4. LIVE-MONEY HARD CAP (independent of any per-trade % limit).
-    // Sums the notional of every currently-open LIVE position + this
-    // proposed trade's notional. Refuses if aggregate would breach
-    // `maxLiveCapital`. Skipped entirely in Practice mode.
-    if (!isPractice && (riskConfig.maxLiveCapital ?? 0) > 0) {
-      let openLiveExposure = 0;
-      try {
-        const liveSnap = await this.db.collection('trades')
-          .where('userId', '==', userId)
-          .where('status', '==', 'open')
-          .where('isPractice', '==', false)
-          .get();
-        for (const doc of liveSnap.docs) {
-          const t: any = doc.data();
-          // Prefer live mark price if we have it; fall back to entry. Either
-          // way the aggregate is computed conservatively — entry is a known
-          // floor, mark price would be more accurate but is best-effort.
-          const px = this.marketState?.[t.symbol]?.price || t.entryPrice || 0;
-          openLiveExposure += (Number(t.quantity) || 0) * Number(px || 0);
-        }
-      } catch (err: any) {
-        // If we can't read live exposure, REFUSE — fail-closed on live money.
-        throw new Error(`RISK LIMIT CHECK FAILED: Could not verify live exposure (${err.message}). Refusing live trade for safety.`);
-      }
-      const projected = openLiveExposure + tradeValue;
-      if (projected > riskConfig.maxLiveCapital) {
-        throw new Error(`LIVE CAP EXCEEDED: Open live exposure $${openLiveExposure.toFixed(2)} + this trade $${tradeValue.toFixed(2)} = $${projected.toFixed(2)} would breach the $${riskConfig.maxLiveCapital} live cap. Increase Max Live Capital in Risk Manager or close existing live positions.`);
-      }
-    }
-  }
-
   async execute(params: any) {
-    const { userId, symbol, side, quantity, market, mode, isPractice, stopLossPrice, takeProfitPrice, trailingStopDistance, profitTarget } = params;
+    const { userId, symbol, side, quantity, market, mode, isPractice, stopLossPrice, takeProfitPrice, trailingStopDistance, profitTarget, leverage } = params;
 
     const assetClass = this.resolveAssetClass(market, symbol);
 
@@ -216,8 +135,37 @@ export class TradeExecutor {
       }
     }
 
-    // Apply Risk Management Guardrails (incl. live-money hard cap)
-    await this.checkRiskManagement(userId, Number(quantity), price, isPractice !== false);
+    // Risk Gate (Phase 9.3) — single audit point for every position-open.
+    // Covers: kill switch, daily loss, notional %, concurrent positions,
+    // live-capital cap, leverage cap. Codes returned so we can route the
+    // rejection (kill_switch_triggered vs risk_gate_block) to brainActivity.
+    const gateResult = await this.riskGate.checkOpen({
+      userId,
+      symbol,
+      side,
+      quantity: Number(quantity),
+      price,
+      assetClass,
+      isPractice: isPractice !== false,
+      leverage: typeof leverage === 'number' ? leverage : undefined,
+    });
+    if (!gateResult.allowed) {
+      const activityType = gateResult.code === 'KILL_SWITCH' ? 'kill_switch_triggered' : 'risk_gate_block';
+      try {
+        await this.db.collection('brainActivity').add({
+          userId,
+          type: activityType,
+          timestamp: new Date().toISOString(),
+          symbol,
+          side,
+          quantity: Number(quantity),
+          code: gateResult.code,
+          reason: gateResult.reason,
+          context: gateResult.context || null,
+        });
+      } catch {}
+      throw new Error(`${gateResult.code}: ${gateResult.reason}`);
+    }
 
     let fillPrice = price;
     let orderId = `paper-order-${Date.now()}`;
@@ -466,10 +414,34 @@ export class TradeExecutor {
     const message = `🔒 <b>Position Closed</b>\n\n${data.side === 'buy' ? 'LONG' : 'SHORT'} ${data.quantity} ${data.symbol}\nExit: $${currentPrice.toFixed(2)}\nPnL: ${pnlEmoji} $${realizedPnl.toFixed(2)}`;
     await sendTelegramNotification(this.db, userId, message);
 
-    return { 
-      tradeId, 
-      exitPrice: currentPrice, 
-      realizedPnl, 
+    // Post-Mortem (Phase 1.audit-fix) — manual closes previously skipped this
+    // entirely, losing the lesson. Now every closed trade flows into vector
+    // memory so Scholar's recall finds it on the next decision.
+    try {
+      const pnlPercent = data.entryPrice > 0
+        ? (realizedPnl / (data.entryPrice * data.quantity)) * 100
+        : 0;
+      const postMortemEngine = new PostMortemEngine(this.db, this.memoryManager || undefined);
+      // Fire-and-forget — don't block the close response on AI analysis.
+      postMortemEngine.analyze({
+        tradeId,
+        symbol: data.symbol,
+        side: data.side,
+        entryPrice: data.entryPrice,
+        exitPrice: currentPrice,
+        pnl: realizedPnl,
+        pnlPercent,
+        closeReason: 'manual close',
+        userId,
+      }).catch(err => console.error('[closePosition] PostMortem failed:', err.message));
+    } catch (err: any) {
+      console.error('[closePosition] PostMortem setup failed:', err.message);
+    }
+
+    return {
+      tradeId,
+      exitPrice: currentPrice,
+      realizedPnl,
       status: "closed",
       trade: {
         ...data,
@@ -542,7 +514,10 @@ export class TradeExecutor {
     const priceDiff = currentPrice - data.entryPrice;
     const partialPnl = isLong ? (priceDiff * closeQuantity) : (-priceDiff * closeQuantity);
 
-    // Update trade: reduce quantity, move stop to breakeven, add trailing stop
+    // Update trade: reduce quantity, move stop to breakeven, add trailing stop.
+    // Phase 5 — "let winners run": trailing widened from 1% to 2% so the
+    // remainder has room to breathe (was getting stopped on normal volatility),
+    // and profitTarget is cleared so a re-hit doesn't fire another partial.
     await tradeRef.update({
       quantity: remainingQuantity,
       originalQuantity: data.quantity,  // Preserve original for history
@@ -553,12 +528,14 @@ export class TradeExecutor {
         exitOrderId,
         closedAt: new Date().toISOString(),
       }],
-      // Move stop to breakeven — risk-free on the remainder!
+      // Move stop to breakeven — risk-free on the remainder
       stopLossPrice: data.entryPrice,
-      // Enable trailing stop on remainder (use 1% of price as distance if not set)
-      trailingStopDistance: data.trailingStopDistance || (currentPrice * 0.01),
-      // Clear the take profit so it doesn't trigger a full close again
+      // Wider trailing on remainder so volatility doesn't shake out the winner.
+      // Use existing trailing if set; else 2% of current price.
+      trailingStopDistance: data.trailingStopDistance || (currentPrice * 0.02),
+      // Clear both take-profit triggers so this position can run on trailing alone
       takeProfitPrice: null,
+      profitTarget: null,
       partialClosedAt: new Date().toISOString(),
     });
 

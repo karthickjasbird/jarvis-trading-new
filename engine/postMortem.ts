@@ -10,7 +10,7 @@
  * the same mistake twice.
  */
 
-import { generateText } from './modelRouter.ts';
+import { generateTextForPurpose } from './modelRouter.ts';
 import { TechnicalAnalysisEngine } from './technicalAnalysis.ts';
 import { MemoryManager } from './memory.ts';
 import { TradeDiaryEngine } from './tradeDiary.ts';
@@ -102,7 +102,7 @@ Grading:
 Be specific. Reference the actual numbers.`;
 
     try {
-      const response = await generateText('gemini-2.5-flash', prompt);
+      const response = await generateTextForPurpose('post-mortem', prompt);
       const cleaned = response.replace(/```json?|```/g, '').trim();
       const result = JSON.parse(cleaned);
 

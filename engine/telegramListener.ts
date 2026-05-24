@@ -14,7 +14,7 @@
 import { sendTelegramNotification } from './telegram.ts';
 import { PortfolioIntelligence } from './portfolioIntel.ts';
 import { MarketIntelligenceEngine } from './marketIntel.ts';
-import { generateText } from './modelRouter.ts';
+import { generateTextForPurpose } from './modelRouter.ts';
 
 const TELEGRAM_API = 'https://api.telegram.org/bot';
 
@@ -127,7 +127,7 @@ Keep your answers concise, actionable, and formatted for a mobile chat app (use 
 Do NOT use markdown code blocks unless writing code. Just answer the user's question directly.
 User's message: "${text}"`;
 
-        const reply = await generateText('gemini-2.5-flash', systemPrompt);
+        const reply = await generateTextForPurpose('telegram-chat', systemPrompt);
         
         // Remove markdown formatting like ``` or ** that Telegram might choke on if it's too complex
         // Actually Telegram supports basic <b>, <i>, <code>, <pre>. Gemini usually outputs **bold**.

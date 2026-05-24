@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import admin from 'firebase-admin';
 import * as cheerio from 'cheerio';
-import { generateText } from './modelRouter.ts';
+import { generateTextForPurpose } from './modelRouter.ts';
 
 export interface MemoryItem {
   id: string;
@@ -210,7 +210,7 @@ export class MemoryManager {
       // E.g., if it's a 10,000 word page, we'll compress it down to core principles.
       const prompt = `You are a trading analyst distilling knowledge. Read the following raw text scraped from a website and summarize the core trading strategies, market indicators, or financial concepts discussed. Return ONLY the summarized bullet points or rules that a trader should remember. Limit to 300 words. \n\nRaw Text: ${rawText.substring(0, 30000)}`;
 
-      const summary = await generateText(model || 'gemini-2.5-flash', prompt);
+      const summary = await generateTextForPurpose('memory-summary', prompt, { model });
       if (!summary) throw new Error("Failed to generate summary from the page.");
 
       onProgress?.('embedding', 85, 'Generating embeddings...');
@@ -370,7 +370,7 @@ export class MemoryManager {
             // Summarize
             const prompt = `You are a trading analyst distilling knowledge. Read the following raw text scraped from a website and summarize the core trading strategies, market indicators, or financial concepts discussed. Return ONLY the summarized bullet points or rules that a trader should remember. Limit to 300 words. \n\nRaw Text: ${rawText.substring(0, 30000)}`;
 
-            const summary = await generateText(model || 'gemini-2.5-flash', prompt);
+            const summary = await generateTextForPurpose('memory-summary-batch', prompt, { userId, model });
             if (summary) {
               await this.saveMemory(userId, `Knowledge acquired from [${pageUrl}]:\n${summary}`, 'semantic');
             }

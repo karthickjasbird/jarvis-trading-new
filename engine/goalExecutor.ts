@@ -18,6 +18,7 @@ import { sendTelegramNotification } from './telegram.ts';
 import { RegimeDetector, RegimeResult } from './regimeDetector.ts';
 import { KellyCalculator } from './kellyCalculator.ts';
 import { detectAssetClass } from './alpacaConnector.ts';
+import { isHalted } from './killSwitch.ts';
 
 /**
  * Strategy profile picked by the deadline router (Phase 8.5). Maps a
@@ -119,6 +120,29 @@ export class GoalExecutor {
     isPractice: boolean,
     maxSlots: number = 3
   ): Promise<Campaign> {
+    // ─── Phase 6 — Minimum-target sanity check ───
+    // The campaign math distributes target profit across slots. If the target
+    // is too small relative to the SL distance, the resulting TP placement
+    // produces sub-1.5:1 R/R trades that lose money at any realistic win rate.
+    //
+    // Math: per-slot reward must be ≥ 1.5× per-slot risk. With a 2.5% SL on a
+    // (capital/maxSlots) position, that requires target ≥ capital × 2.5% × 1.5
+    // = capital × 3.75%. Reject below that floor with a clear message so the
+    // user knows what target IS achievable.
+    const SL_PCT = 0.025; // matches non-urgent default in scanAndDeploy
+    const RR_FLOOR = 1.5;
+    const minViableTarget = capital * SL_PCT * RR_FLOOR;
+    if (targetProfit < minViableTarget) {
+      const minPct = (SL_PCT * RR_FLOOR * 100).toFixed(1);
+      throw new Error(
+        `Campaign target $${targetProfit} too small for $${capital} capital. ` +
+        `Minimum viable target is $${minViableTarget.toFixed(2)} (${minPct}% of capital) — ` +
+        `below this, the TP placement is forced tighter than ${RR_FLOOR}:1 R/R against the SL, ` +
+        `producing structurally losing trades. Suggest target $${minViableTarget.toFixed(0)} or higher, ` +
+        `OR increase capital, OR set a longer deadline (longer deadlines allow looser SL).`
+      );
+    }
+
     const deadline = new Date();
     deadline.setDate(deadline.getDate() + deadlineDays);
 
@@ -263,6 +287,25 @@ export class GoalExecutor {
    */
   async scanAndDeploy(campaign: Campaign): Promise<void> {
     if (campaign.status !== 'active') return;
+
+    // Kill switch — skip deployment while trading is halted. Existing trades
+    // continue to be managed by sentry; this only stops NEW exposure.
+    const haltState = isHalted();
+    if (haltState.halted) {
+      console.log(`[CAMPAIGN ${campaign.id}] ⛔ Skipped — trading halted (${haltState.reason || 'manual halt'})`);
+      try {
+        await this.db.collection('brainActivity').add({
+          userId: campaign.userId,
+          type: 'kill_switch_triggered',
+          timestamp: new Date().toISOString(),
+          source: 'campaign_scan',
+          campaignId: campaign.id,
+          reason: haltState.reason || 'manual halt',
+          haltedSince: haltState.since || null,
+        });
+      } catch {}
+      return;
+    }
 
     // Check deadline
     if (new Date(campaign.deadline) <= new Date()) {
@@ -413,6 +456,23 @@ export class GoalExecutor {
         // Dynamic stop loss: regime-adjusted + urgency-adjusted
         const baseSl = campaign.urgency === 'critical' ? 0.015 : campaign.urgency === 'urgent' ? 0.02 : 0.025;
         const stopLossPrice = price * (1 - (baseSl * rec.stopLossMultiplier));
+
+        // ─── Phase 6 — R/R floor for campaign trades ───
+        // Mirrors the Sentinel check (Phase 3) so campaign deployments can't
+        // bypass the 1.5:1 R/R discipline. If the campaign's target-derived
+        // TP is too tight against the SL, skip this candidate and try the
+        // next one. This is the same math the Sentinel applies to manual
+        // swarm runs — campaigns now respect it too.
+        const tpDistance = takeProfitPrice - price;
+        const slDistance = price - stopLossPrice;
+        const realizedRR = slDistance > 0 ? tpDistance / slDistance : 0;
+        if (realizedRR < 1.5) {
+          console.log(`[CAMPAIGN ${campaign.id}] ⏭ Skipping ${opp.symbol} — R/R ${realizedRR.toFixed(2)}:1 below 1.5:1 floor (TP $${takeProfitPrice.toFixed(4)} vs SL $${stopLossPrice.toFixed(4)})`);
+          await this.logBrainActivity(campaign.userId,
+            `⏭ R/R SKIP: ${opp.symbol} R/R ${realizedRR.toFixed(2)}:1 — campaign target too small for this SL distance`
+          );
+          continue;
+        }
 
         // Execute trade — tag the market so tradeExecutor routes the
         // order to the right broker (Alpaca for stocks, ccxt for crypto).
@@ -677,12 +737,15 @@ export class GoalExecutor {
    */
   async getUserCampaigns(userId: string): Promise<Campaign[]> {
     try {
+      // Query without orderBy to avoid needing composite index (userId, createdAt)
+      // — sort client-side instead. Previously this used orderBy and silently
+      // returned empty when the index hadn't been deployed.
       const snapshot = await this.db.collection('campaigns')
         .where('userId', '==', userId)
-        .orderBy('createdAt', 'desc')
-        .limit(10)
         .get();
-      return snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const all = snapshot.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      all.sort((a: any, b: any) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      return all.slice(0, 20);
     } catch {
       return [];
     }

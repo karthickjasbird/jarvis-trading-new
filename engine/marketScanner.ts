@@ -5,7 +5,7 @@
  * and ranks opportunities for the Agent Swarm pipeline.
  */
 
-import { generateText } from './modelRouter.ts';
+import { generateTextForPurpose } from './modelRouter.ts';
 import { TechnicalAnalysisEngine } from './technicalAnalysis.ts';
 import { AlpacaConnector } from './alpacaConnector.ts';
 
@@ -89,6 +89,10 @@ export interface ScanResult {
   signal?: string;
   rsi?: number;
   confluence?: string;
+  /** Multi-timeframe agreement % (0-100). Low = timeframes disagree. */
+  confluenceConfidence?: number;
+  /** Per-timeframe bias breakdown for transparency. */
+  timeframes?: Array<{ tf: string; bias: string; confidence: number }>;
   taSignal?: string;
   obv?: number;
   obvSlope?: 'up' | 'down' | 'flat';
@@ -168,7 +172,13 @@ export class MarketScanner {
 
     let score = 50; // baseline
 
-    // ── TA Signal (PRIMARY — up to ±40 points) ──
+    // ── TA Signal (PRIMARY — up to ±40 points, SCALED by confluence) ──
+    // Bug fix: previously a "strong_buy" bias added +40 regardless of whether
+    // the timeframes actually agreed. That meant a coin with 1H+4H strong_buy
+    // but 1D sell (only 58% confluence confidence) scored the same as one with
+    // all 3 timeframes agreeing (90% confidence). Now we scale by confidence
+    // so disagreement visibly lowers the score. NEAR (90%) loses 4 points;
+    // BNB-style (58%) loses ~17 points — the divergence is now legible.
     const taScore: Record<string, number> = {
       'strong_buy': 40,
       'buy': 20,
@@ -176,7 +186,9 @@ export class MarketScanner {
       'sell': -20,
       'strong_sell': -40,
     };
-    score += taScore[taBias] ?? 0;
+    const biasBonus = taScore[taBias] ?? 0;
+    const confidenceFactor = Math.max(0, Math.min(1, taConfidence / 100));
+    score += biasBonus * confidenceFactor;
 
     // ── Momentum alignment with TA (up to ±10 points) ──
     const isBullishTA = taBias === 'buy' || taBias === 'strong_buy';
@@ -286,6 +298,12 @@ export class MarketScanner {
 
           // Use multi-TF CONFLUENCE bias (not just 1H) for score & signal
           result.confluence = mtfReport.confluence.bias;
+          result.confluenceConfidence = mtfReport.confluence.confidence;
+          result.timeframes = mtfReport.analyses.map(a => ({
+            tf: a.timeframe,
+            bias: a.signal.bias,
+            confidence: a.signal.confidence,
+          }));
           result.taSignal = mtfReport.confluence.reasons.slice(0, 3).join('; ');
 
           console.log(`[SCANNER] 📊 Volume Intelligence for ${result.symbol}: OBV=${result.obv} (${result.obvSlope}), VWAP=${result.vwap?.toFixed(4)}, Price=${result.price}`);
@@ -351,7 +369,7 @@ export class MarketScanner {
 - Score: ${opp.score}/100
 
 Write a ONE-LINE trading signal (under 15 words) based on the REAL indicators. Be specific.`;
-        opp.signal = await generateText('gemini-2.5-flash', prompt);
+        opp.signal = await generateTextForPurpose('scanner-signal', prompt);
       } catch {
         opp.signal = `${opp.confluence === 'buy' || opp.confluence === 'strong_buy' ? '📈' : opp.confluence === 'sell' || opp.confluence === 'strong_sell' ? '📉' : '➡️'} ${opp.change24h > 0 ? '+' : ''}${opp.change24h.toFixed(1)}% — ${opp.confluence || opp.momentum}`;
       }

@@ -125,6 +125,18 @@ stored at runtime via `userSecrets.ts`.
 
 ## Current phase
 
-Last commit: `v1.2.0`. Large uncommitted WIP — Agent Swarm overhaul + new Trade Diary
-system + JarvisBrain UI expansion. Claude's memory file `project_phase.md` holds the
-live snapshot; verify against `git status` each session.
+Last committed: `v1.4.4` (Campaign control surface). **Large uncommitted WIP** spanning a
+~5-hour rebuild session — see Claude memory `project_phase.md` for the full snapshot.
+
+**v1.5.0 candidate (uncommitted):** ONBOARDING guide + 6 architectural phases
+(closed-loop learning fix, track-record analysis, swarm selectivity tightening,
+trading curriculum embedded into vector memory, let-winners-run exit logic, campaign
+R/R parity), Scanner SCORE honesty fix with timeframe dots + popover, full
+integration audit + 7 ghost-feature fixes, TradingView Bridge UX (auto-connect on
+startup + UI pill + auto-navigate + RiskManager toggle).
+
+**Audit reality check:** 15/21 engines verified working end-to-end. Real ghosts: 2
+(WebAgent placeholder + brainActivity composite index needs `firebase deploy`).
+`scratch/audit-integration.ts` is the re-runnable probe.
+
+Verify against `git status` each session — there's a lot uncommitted.

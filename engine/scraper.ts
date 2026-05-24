@@ -23,7 +23,7 @@
 
 import Parser from 'rss-parser';
 import { MemoryManager } from './memory.ts';
-import { generateText } from './modelRouter.ts';
+import { generateTextForPurpose } from './modelRouter.ts';
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -168,7 +168,7 @@ Rules:
       let result: SentimentResult;
 
       try {
-        const response = await generateText('gemini-2.5-flash', prompt);
+        const response = await generateTextForPurpose('sentiment', prompt);
         const cleaned = response.replace(/```json?|```/g, '').trim();
         const parsed = JSON.parse(cleaned);
 

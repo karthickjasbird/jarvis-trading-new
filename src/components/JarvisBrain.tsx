@@ -29,6 +29,10 @@ import {
   Gauge,
   PieChart,
   Newspaper,
+  Ban,
+  DollarSign,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { db } from '../firebase';
@@ -121,6 +125,23 @@ const MOCK_ACTIVITY = [
 interface JarvisBrainProps {
   isPracticeMode: boolean;
   userId?: string;
+}
+
+/** Bias → color for the per-timeframe dot indicators (mirrors MarketWatchlist). */
+function tfBiasColor(bias?: string): string {
+  if (bias === 'strong_buy') return 'bg-emerald-500';
+  if (bias === 'buy') return 'bg-emerald-500/60';
+  if (bias === 'strong_sell') return 'bg-red-500';
+  if (bias === 'sell') return 'bg-red-500/60';
+  return 'bg-zinc-600';
+}
+
+function tfBiasGlyph(bias?: string): string {
+  if (bias === 'strong_buy') return '▲▲';
+  if (bias === 'buy') return '▲';
+  if (bias === 'strong_sell') return '▼▼';
+  if (bias === 'sell') return '▼';
+  return '◆';
 }
 
 // ─── Market Regime Sub-Component (Multi-Coin) ───────────────
@@ -589,6 +610,23 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
   // Autonomous mode state
   const [autoMode, setAutoMode] = useState(true);
 
+  // Kill switch state (Phase 9.1)
+  const [haltState, setHaltState] = useState<{ halted: boolean; reason?: string; since?: string; source?: string }>({ halted: false });
+
+  // Cost telemetry state (Phase 9.2)
+  const [costSummary, setCostSummary] = useState<{
+    today: number;
+    last24h: number;
+    totalCalls: number;
+    byPurpose: Record<string, { cost: number; calls: number; tokens: number }>;
+    byModel: Record<string, { cost: number; calls: number }>;
+  } | null>(null);
+  const [showCostBreakdown, setShowCostBreakdown] = useState(false);
+
+  // TradingView Bridge state (Option C)
+  const [tvStatus, setTvStatus] = useState<{ connected: boolean; tabTitle?: string | null; browserURL?: string }>({ connected: false });
+  const [tvConnecting, setTvConnecting] = useState(false);
+
   // Confidence Engine state
   const [confidence, setConfidence] = useState<any>(null);
   const [loadingConfidence, setLoadingConfidence] = useState(false);
@@ -614,6 +652,81 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
       toast.success(`Autonomous mode ${data.enabled ? 'ENABLED ✅' : 'DISABLED ⛔'}`);
     } catch {
       toast.error('Failed to toggle autonomous mode');
+    }
+  };
+
+  // Kill switch handlers (Phase 9.1)
+  const fetchHaltStatus = async () => {
+    try {
+      const res = await fetch('/api/halt/status');
+      setHaltState(await res.json());
+    } catch {}
+  };
+
+  const handleHalt = async () => {
+    const reason = window.prompt(
+      'HALT all new trading?\n\nExisting positions can still be closed.\nNew entries + campaign deploys will be blocked.\n\nReason (optional):',
+      'manual halt'
+    );
+    if (reason === null) return;
+    try {
+      const res = await fetch('/api/halt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason || 'manual halt' })
+      });
+      setHaltState(await res.json());
+      toast.error('🛑 TRADING HALTED', { duration: 5000 });
+    } catch {
+      toast.error('Failed to halt trading');
+    }
+  };
+
+  const handleResume = async () => {
+    if (!window.confirm('Resume trading?\n\nNew entries and campaign deploys will be allowed again.')) return;
+    try {
+      const res = await fetch('/api/resume', { method: 'POST' });
+      setHaltState(await res.json());
+      toast.success('✅ Trading resumed', { duration: 3000 });
+    } catch {
+      toast.error('Failed to resume trading');
+    }
+  };
+
+  // Cost telemetry fetch (Phase 9.2)
+  const fetchCostSummary = async () => {
+    try {
+      const res = await fetch('/api/cost/summary');
+      setCostSummary(await res.json());
+    } catch {}
+  };
+
+  // TradingView Bridge handlers (Option C)
+  const fetchTvStatus = async () => {
+    try {
+      const res = await fetch('/api/tradingview/status');
+      setTvStatus(await res.json());
+    } catch {}
+  };
+
+  const handleTvToggle = async () => {
+    setTvConnecting(true);
+    try {
+      const endpoint = tvStatus.connected ? '/api/tradingview/disconnect' : '/api/tradingview/connect';
+      const res = await fetch(endpoint, { method: 'POST' });
+      const data = await res.json();
+      setTvStatus(data);
+      if (data.connected) {
+        toast.success(`👁️ TV connected: ${data.tabTitle || 'tab open'}`);
+      } else if (data.error) {
+        toast.error(`👁️ TV failed: ${data.error.slice(0, 80)}`);
+      } else {
+        toast.success('👁️ TV disconnected');
+      }
+    } catch {
+      toast.error('TV bridge unreachable');
+    } finally {
+      setTvConnecting(false);
     }
   };
 
@@ -643,11 +756,14 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
   };
 
   // Real-time goals listener (no orderBy to avoid composite index requirement)
+  // Audit fix: previously read `tradingGoals` (always empty — goalPlanner is
+  // dead code). Now reads `campaigns` collection where /api/goals/create
+  // actually writes via goalExecutor.createCampaign.
   useEffect(() => {
     if (!userId) return;
 
     const q = query(
-      collection(db, 'tradingGoals'),
+      collection(db, 'campaigns'),
       where('userId', '==', userId),
     );
 
@@ -887,9 +1003,15 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
     fetchActivity();
     fetchScan();
     fetchAutoStatus();
+    fetchHaltStatus();
+    fetchCostSummary();
+    fetchTvStatus();
     const interval = setInterval(() => {
       fetchActivity();
       fetchScan();
+      fetchHaltStatus();
+      fetchCostSummary();
+      fetchTvStatus();
     }, 10000);
     return () => clearInterval(interval);
   }, []);
@@ -964,6 +1086,55 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
             <Power className={`w-3 h-3 ${autoMode ? 'animate-pulse' : ''}`} />
             {autoMode ? 'AUTO: ON' : 'AUTO: OFF'}
           </button>
+          <button
+            onClick={haltState.halted ? handleResume : handleHalt}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              haltState.halted
+                ? 'bg-red-500/30 text-red-200 border border-red-500/60 hover:bg-red-500/40 animate-pulse'
+                : 'bg-zinc-800 text-zinc-400 border border-zinc-700 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/30'
+            }`}
+            title={haltState.halted
+              ? `Halted: ${haltState.reason}${haltState.since ? ` (since ${new Date(haltState.since).toLocaleTimeString()})` : ''}`
+              : 'Stop all NEW trading. Closes remain allowed.'}
+          >
+            <Ban className={`w-3 h-3 ${haltState.halted ? 'animate-pulse' : ''}`} />
+            {haltState.halted ? 'HALTED' : 'HALT'}
+          </button>
+          <button
+            onClick={() => setShowCostBreakdown(v => !v)}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30 hover:bg-amber-500/20 transition-all"
+            title={costSummary ? `${costSummary.totalCalls} calls in last 24h — click for breakdown` : 'API spend today (click for breakdown)'}
+          >
+            <DollarSign className="w-3 h-3" />
+            {costSummary ? `$${costSummary.today.toFixed(2)}` : '$0.00'}
+          </button>
+          <button
+            onClick={handleTvToggle}
+            disabled={tvConnecting}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              tvConnecting
+                ? 'bg-yellow-500/20 text-yellow-300 border border-yellow-500/40 cursor-wait'
+                : tvStatus.connected
+                  ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/40 hover:bg-cyan-500/25'
+                  : 'bg-zinc-800 text-zinc-500 border border-zinc-700 hover:bg-cyan-500/10 hover:text-cyan-400 hover:border-cyan-500/30'
+            }`}
+            title={tvStatus.connected
+              ? `TradingView bridge connected — chart: ${tvStatus.tabTitle || 'tab open'}. Click to disconnect.`
+              : 'TradingView bridge offline. Start Chrome with --remote-debugging-port=9222, open TradingView, click to connect.'}
+          >
+            {tvConnecting ? (
+              <RefreshCw className="w-3 h-3 animate-spin" />
+            ) : tvStatus.connected ? (
+              <Eye className="w-3 h-3" />
+            ) : (
+              <EyeOff className="w-3 h-3" />
+            )}
+            {tvConnecting
+              ? 'CONNECTING...'
+              : tvStatus.connected
+                ? (tvStatus.tabTitle?.match(/^([A-Z]+(?:USDT)?)/)?.[1] || 'TV')
+                : 'TV'}
+          </button>
           <div className={`brain-status-pill ${swarmStatus !== 'idle' ? 'active' : ''}`}>
             {swarmStatus !== 'idle' ? (
               <Wifi className="w-3.5 h-3.5 text-emerald-400" />
@@ -979,6 +1150,78 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
           </div>
         </div>
       </div>
+
+      {/* ─── Cost Breakdown Popover (Phase 9.2) ─── */}
+      {showCostBreakdown && costSummary && (
+        <div className="rounded-xl border border-amber-500/30 bg-zinc-900/80 backdrop-blur p-4 mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <DollarSign className="w-4 h-4 text-amber-400" />
+              <span className="text-sm font-semibold text-zinc-200">API Spend</span>
+              <span className="text-[10px] text-zinc-500">last 24h</span>
+            </div>
+            <button
+              onClick={() => setShowCostBreakdown(false)}
+              className="text-zinc-500 hover:text-zinc-300 text-xs"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 mb-4">
+            <div className="rounded-lg bg-zinc-800/60 p-3">
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wide mb-1">Today</div>
+              <div className="text-lg font-bold text-amber-400">${costSummary.today.toFixed(4)}</div>
+            </div>
+            <div className="rounded-lg bg-zinc-800/60 p-3">
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wide mb-1">Last 24h</div>
+              <div className="text-lg font-bold text-amber-400">${costSummary.last24h.toFixed(4)}</div>
+            </div>
+            <div className="rounded-lg bg-zinc-800/60 p-3">
+              <div className="text-[10px] text-zinc-500 uppercase tracking-wide mb-1">Calls</div>
+              <div className="text-lg font-bold text-zinc-200">{costSummary.totalCalls}</div>
+            </div>
+          </div>
+
+          <div className="mb-3">
+            <div className="text-[10px] text-zinc-500 uppercase tracking-wide mb-2">By Purpose</div>
+            <div className="space-y-1">
+              {Object.entries(costSummary.byPurpose)
+                .sort((a, b) => (b[1] as any).cost - (a[1] as any).cost)
+                .map(([purpose, stats]) => (
+                  <div key={purpose} className="flex items-center justify-between text-xs py-1 border-b border-zinc-800/60">
+                    <span className="text-zinc-300">{purpose}</span>
+                    <div className="flex items-center gap-3 text-zinc-500">
+                      <span>{(stats as any).calls} calls</span>
+                      <span>{((stats as any).tokens / 1000).toFixed(1)}k tok</span>
+                      <span className="text-amber-400 font-mono w-16 text-right">${(stats as any).cost.toFixed(4)}</span>
+                    </div>
+                  </div>
+                ))}
+              {Object.keys(costSummary.byPurpose).length === 0 && (
+                <div className="text-xs text-zinc-500 italic py-2">No API calls yet. Trigger a scan to populate.</div>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <div className="text-[10px] text-zinc-500 uppercase tracking-wide mb-2">By Model</div>
+            <div className="space-y-1">
+              {Object.entries(costSummary.byModel)
+                .sort((a, b) => (b[1] as any).cost - (a[1] as any).cost)
+                .map(([model, stats]) => (
+                  <div key={model} className="flex items-center justify-between text-xs py-1">
+                    <span className="text-zinc-400 font-mono">{model}</span>
+                    <div className="flex items-center gap-3 text-zinc-500">
+                      <span>{(stats as any).calls} calls</span>
+                      <span className="text-amber-400 font-mono w-16 text-right">${(stats as any).cost.toFixed(4)}</span>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ─── Jarvis Confidence Widget ─── */}
       {isPracticeMode && (
@@ -1560,6 +1803,20 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
                       <TrendingDown className="w-3 h-3 text-red-400" />
                     )}
                     <span className="text-xs font-bold text-zinc-200">{opp.symbol}</span>
+                    {/* 1H/4H/1D timeframe dots — divergence visible at a glance */}
+                    {opp.timeframes && opp.timeframes.length > 0 && (
+                      <div
+                        className="flex items-center gap-0.5"
+                        title={opp.timeframes.map((t: any) => `${t.tf}: ${t.bias} (${t.confidence}%)`).join('  •  ')}
+                      >
+                        {opp.timeframes.map((t: any) => (
+                          <span
+                            key={t.tf}
+                            className={`w-1.5 h-1.5 rounded-full ${tfBiasColor(t.bias)}`}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-1 mt-0.5 ml-[18px]">
                     {opp.vwap !== undefined && (
@@ -1620,14 +1877,59 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
                     </span>
                   ) : <span className="text-[10px] text-zinc-700">—</span>}
                 </div>
-                <div className="col-span-1 flex justify-center">
-                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                <div className="col-span-1 flex justify-center relative group/score">
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded cursor-help ${
                     opp.score >= 80 ? 'bg-emerald-500/15 text-emerald-400' :
                     opp.score >= 65 ? 'bg-amber-500/15 text-amber-400' :
                     'bg-zinc-700 text-zinc-400'
                   }`}>
                     {opp.score}
                   </span>
+                  {/* Hover popover — shows the breakdown the SCORE compresses */}
+                  {(opp.timeframes || opp.confluenceConfidence !== undefined) && (
+                    <div className="hidden group-hover/score:block absolute top-full right-0 mt-2 z-50 w-64 bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl p-3 text-left">
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-2">
+                        Score Breakdown
+                      </div>
+                      <div className="flex items-center justify-between mb-2 pb-2 border-b border-zinc-800">
+                        <span className="text-[11px] text-zinc-400">Confluence</span>
+                        <span className={`text-sm font-bold font-mono ${
+                          (opp.confluenceConfidence ?? 0) >= 80 ? 'text-emerald-400' :
+                          (opp.confluenceConfidence ?? 0) >= 60 ? 'text-amber-400' :
+                          'text-red-400'
+                        }`}>
+                          {opp.confluenceConfidence !== undefined ? `${opp.confluenceConfidence}%` : '—'}
+                        </span>
+                      </div>
+                      {opp.timeframes && opp.timeframes.length > 0 && (
+                        <div className="space-y-1.5">
+                          {opp.timeframes.map((t: any) => (
+                            <div key={t.tf} className="flex items-center justify-between text-[11px]">
+                              <div className="flex items-center gap-2">
+                                <span className={`w-2 h-2 rounded-full ${tfBiasColor(t.bias)}`} />
+                                <span className="text-zinc-300 font-mono">{t.tf}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className={`font-medium ${
+                                  t.bias === 'strong_buy' || t.bias === 'buy' ? 'text-emerald-400' :
+                                  t.bias === 'strong_sell' || t.bias === 'sell' ? 'text-red-400' :
+                                  'text-zinc-500'
+                                }`}>
+                                  {tfBiasGlyph(t.bias)} {t.bias}
+                                </span>
+                                <span className="text-zinc-500 font-mono w-9 text-right">{t.confidence}%</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {opp.confluenceConfidence !== undefined && opp.confluenceConfidence < 70 && (
+                        <div className="mt-2 pt-2 border-t border-zinc-800 text-[10px] text-amber-400/80">
+                          ⚠️ Timeframes disagree — SCORE scaled down to reflect divergence
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <span className="col-span-4 text-[11px] text-zinc-500 truncate">
                   {opp.signal || `${opp.momentum} momentum`}

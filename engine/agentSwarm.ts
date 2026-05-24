@@ -19,7 +19,7 @@
  *   - Identity is rebuilt at each pipeline run with live telemetry
  */
 
-import { generateText } from './modelRouter.ts';
+import { generateTextForPurpose } from './modelRouter.ts';
 import { StrategyTracker } from './strategyTracker.ts';
 import { TechnicalAnalysisEngine, MultiTimeframeReport } from './technicalAnalysis.ts';
 import { MarketIntelligenceEngine } from './marketIntel.ts';
@@ -509,7 +509,7 @@ Based on this REAL data, provide:
 Keep it under 100 words. Plain text only. Be specific — reference the actual numbers.`;
 
     try {
-      const analysis = await generateText('gemini-2.5-flash', prompt);
+      const analysis = await generateTextForPurpose('analyst', prompt, { userId: this.currentUserId ?? undefined });
       await this.log('analyst', `📊 ${analysis.slice(0, 150)}...`, 'analysis', {
         symbol: opportunity.symbol,
         analysis,
@@ -595,7 +595,7 @@ Based on this REAL intelligence, provide:
 Keep under 100 words. Plain text. Reference the actual data.`;
 
     try {
-      const research = await generateText('gemini-2.5-flash', prompt);
+      const research = await generateTextForPurpose('scholar', prompt, { userId: this.currentUserId ?? undefined });
       await this.log('scholar', `📚 ${research.slice(0, 150)}...`, 'analysis', { symbol, research });
       return `${research}\n\n--- RAW INTELLIGENCE ---\n${intelSummary}`;
     } catch (err) {
@@ -666,15 +666,45 @@ Keep under 100 words. Plain text. Reference the actual data.`;
     }
 
     // 6. NEXUS Phase 6 — Gemini Vision read of the live TradingView chart.
-    //    Only run if TV is connected AND showing the same symbol. ~15s latency.
+    //    Option C: if bridge is connected, auto-navigate to the analyzed symbol
+    //    (controlled by user's autoNavigateTV setting, default ON). Without
+    //    auto-navigate, vision rarely fires — user has to manually keep TV
+    //    on the same symbol the swarm picks.
     let visionContext = 'Visual chart read unavailable.';
     try {
       const bridge = getTradingViewBridge();
       if (bridge.isConnected()) {
+        // Check user's auto-navigate preference (default ON)
+        let autoNav = true;
+        try {
+          const rs = await this.db.collection('riskSettings').doc(this.currentUserId || '').get();
+          if (rs.exists) {
+            const data: any = rs.data() || {};
+            if (data.autoNavigateTV === false) autoNav = false;
+          }
+        } catch {}
+
         const health = await bridge.healthCheck();
         const tvTicker = health.tabTitle?.match(/^([A-Z]+(?:\/[A-Z]+)?)\s/)?.[1];
         const wanted = opportunity.symbol.replace('/', '').toUpperCase();
-        if (tvTicker === wanted) {
+
+        // If symbols don't match AND autoNav is on, flip the TV chart
+        if (tvTicker !== wanted && autoNav) {
+          try {
+            await this.log('holistic', `👁️ Navigating TV to ${opportunity.symbol} for vision (was on ${tvTicker || 'unknown'})`, 'info');
+            await bridge.setSymbol(opportunity.symbol);
+            // Tiny pause so the chart finishes rendering before screenshot
+            await new Promise(r => setTimeout(r, 1500));
+          } catch (navErr: any) {
+            await this.log('holistic', `👁️ Auto-navigate failed (${navErr?.message?.slice(0, 60)}); skipping vision`, 'info');
+          }
+        }
+
+        // Re-check after potential navigation
+        const finalHealth = autoNav && tvTicker !== wanted ? await bridge.healthCheck() : health;
+        const finalTicker = finalHealth.tabTitle?.match(/^([A-Z]+(?:\/[A-Z]+)?)\s/)?.[1];
+
+        if (finalTicker === wanted) {
           await this.log('holistic', `👁️ Running Gemini Vision on chart (~15s)...`, 'info');
           const v = await analyzeChart(bridge, { symbol: opportunity.symbol });
           const patternStr = v.patterns.length > 0
@@ -689,8 +719,8 @@ Keep under 100 words. Plain text. Reference the actual data.`;
             `Reasoning: ${v.reasoning}`,
           ].join('\n');
           await this.log('holistic', `👁️ Vision: ${v.bias} ${v.conviction}% | ${v.patterns.length} pattern(s)`, 'analysis', { vision: v });
-        } else if (tvTicker) {
-          await this.log('holistic', `👁️ TV chart on ${tvTicker}, analyzing ${wanted} — skipping vision`, 'info');
+        } else if (finalTicker) {
+          await this.log('holistic', `👁️ TV on ${finalTicker}, analyzing ${wanted} — auto-nav ${autoNav ? 'failed' : 'OFF'}, skipping vision`, 'info');
         }
       }
     } catch (err: any) {
@@ -745,7 +775,7 @@ RATIONALE: [2-3 sentences explaining your holistic read. Be specific about what 
 KEY_RISK: [The single biggest risk to this trade in one sentence.]`;
 
     try {
-      const assessment = await generateText('gemini-2.5-flash', prompt);
+      const assessment = await generateTextForPurpose('holistic', prompt, { userId: this.currentUserId ?? undefined });
       
       // Parse conviction level for logging
       const convictionMatch = assessment.match(/CONVICTION:\s*(\S+)/i);
@@ -854,13 +884,15 @@ USER TRADE PARAMETERS:
 Rules:
 - CRITICAL: The trade direction (side) MUST follow the Scout TA Direction above. If Scout says BUY, you MUST propose a BUY. If Scout says SELL, propose a SELL. The regime strategy (mean_reversion, momentum) adjusts SL/TP sizing only — it does NOT flip the trade direction.
 - Use ATR data for SL/TP if available. Follow the SL/TP RULES above (regime-adjusted).
-- Minimum 1.0:1 R/R ratio.
+- **Minimum 1.5:1 R/R ratio.** A 1:1 R/R is a coin-flip with extra steps — at our 56% win rate that's a slow bleed.
 - Position size: Use the user's Capital Per Trade ($${userCapital}) divided by current price to calculate quantity.
-- Confidence 0-100 based on how aligned TA + fundamentals + holistic assessment are. If the Holistic Agent says PASS or has low confidence, reduce your confidence significantly.
+- **Confidence 0-100 based on FULL alignment** — TA + fundamentals + holistic + past lessons. Skip marginal setups by setting confidence below 60 (Sentinel will veto, no harm done). Forcing a trade you don't believe in is how losing systems are born. The bar is "would I bet my own money on this?" — if no, drop confidence.
+- If the Holistic Agent says WEAK, PASS, or shows hesitation → confidence MUST be < 60.
+- If past lessons (Scholar's report) show repeated failures on this symbol with similar setup → confidence MUST be < 60.
 - Set REAL current prices, not 0.`;
 
     try {
-      const response = await generateText('gemini-2.5-flash', prompt);
+      const response = await generateTextForPurpose('strategist', prompt, { userId: this.currentUserId ?? undefined });
       const cleaned = response.replace(/```json?|```/g, '').trim();
       const proposal = JSON.parse(cleaned) as TradeProposal;
 
@@ -893,11 +925,17 @@ Rules:
         proposal.quantity = correctQty;
       }
 
-      // Force confidence floor — AI sometimes sets 0% to sabotage forced-direction trades
-      const minConfidence = Math.min(opportunity.score, 70); // Use Scout score but cap at 70
-      if (proposal.confidence < minConfidence) {
-        await this.log('strategist', `⚠️ AI set confidence ${proposal.confidence}% but Scout score is ${opportunity.score}% — overriding to ${minConfidence}%`, 'info');
-        proposal.confidence = minConfidence;
+      // Phase 3 fix — DON'T override AI's low confidence with Scout's surface-level TA score.
+      // Scout sees price+indicators; the AI Strategist sees regime, fundamentals, past lessons.
+      // When the AI says 35%, that's a meaningful "I don't like this trade" — letting Sentinel
+      // veto it (min 60%) is correct. We only repair clearly-broken AI output (null/NaN/0).
+      if (proposal.confidence === undefined || proposal.confidence === null || Number.isNaN(proposal.confidence) || proposal.confidence === 0) {
+        const repaired = Math.min(opportunity.score, 50); // Conservative repair, NOT inflation
+        await this.log('strategist', `⚠️ AI returned invalid confidence (${proposal.confidence}) — repairing to ${repaired}% from Scout score`, 'info');
+        proposal.confidence = repaired;
+      } else if (proposal.confidence < 50 && opportunity.score >= 80) {
+        // Edge case: log the divergence but TRUST THE AI. This is the signal Karthick was missing.
+        await this.log('strategist', `🤔 Scout ${opportunity.score}% but AI Strategist only ${proposal.confidence}% — trusting AI's full-context view (Sentinel will gate at 60%)`, 'info');
       }
 
       await this.log('strategist',
@@ -1050,20 +1088,26 @@ Rules:
     if (proposal.riskPercent > 5) {
       hardChecks.push(`Risk too high: ${proposal.riskPercent}% (max 5%)`);
     }
-    if (proposal.confidence < 50) {
-      hardChecks.push(`Confidence too low: ${proposal.confidence}% (min 50%)`);
+    // Phase 3 — raised from 50% to 60%. Track record showed 55-65% is the
+    // "honest weak" zone where Holistic + Strategist consistently flag uncertainty.
+    // Skipping these marginal setups is what experienced traders do.
+    if (proposal.confidence < 60) {
+      hardChecks.push(`Confidence too low: ${proposal.confidence}% (min 60%)`);
     }
     if (proposal.stopLoss <= 0 || proposal.takeProfit <= 0) {
       hardChecks.push('Missing stop-loss or take-profit');
     }
 
-    // Check risk-reward ratio (round to avoid floating-point precision issues)
+    // Phase 3 — symmetric R/R floor at 1.5:1 for BOTH sides. Previously BUY was
+    // 1.0:1 (way too lenient — track record showed the 1:1 scalps dominated and
+    // averaged +0.25R per win). 1.5:1 forces the swarm to find setups with real
+    // edge, and 67% of past wins were already at >1.5R so this barely cuts winners.
     if (proposal.side === 'buy') {
       const risk = proposal.entryPrice - proposal.stopLoss;
       const reward = proposal.takeProfit - proposal.entryPrice;
       const rr = risk > 0 ? Math.round((reward / risk) * 100) / 100 : 0;
-      if (risk > 0 && rr < 1.0) {
-        hardChecks.push(`Poor R/R ratio: ${rr.toFixed(1)}:1 (min 1.0:1)`);
+      if (risk > 0 && rr < 1.5) {
+        hardChecks.push(`Poor R/R ratio: ${rr.toFixed(1)}:1 (min 1.5:1)`);
       }
     } else if (proposal.side === 'sell') {
       const risk = proposal.stopLoss - proposal.entryPrice;
@@ -1072,6 +1116,38 @@ Rules:
       if (risk > 0 && rr < 1.5) {
         hardChecks.push(`Poor R/R ratio: ${rr.toFixed(1)}:1 (min 1.5:1)`);
       }
+    }
+
+    // Phase 3 — time-of-day filter. Configurable via riskSettings
+    // (bleedHoursEnabled, bleedStartHourIST, bleedEndHourIST, bleedConfidenceFloor).
+    // Default: 5 PM - 12 AM IST requires ≥75% confidence. Track record showed
+    // 45/120 trades concentrated in this window with ~breakeven net P&L.
+    try {
+      const settingsDoc = await this.db.collection('riskSettings').doc(userId || '').get();
+      const settings: any = settingsDoc.exists ? settingsDoc.data() : {};
+      const enabled = settings.bleedHoursEnabled !== false; // default ON
+      if (enabled) {
+        const startIST = Number.isFinite(settings.bleedStartHourIST) ? settings.bleedStartHourIST : 17; // 5 PM
+        const endIST = Number.isFinite(settings.bleedEndHourIST) ? settings.bleedEndHourIST : 0; // 12 AM
+        const floor = Number.isFinite(settings.bleedConfidenceFloor) ? settings.bleedConfidenceFloor : 75;
+        // Compute current IST hour (IST = UTC + 5:30)
+        const istMs = Date.now() + 5.5 * 60 * 60 * 1000;
+        const istHour = new Date(istMs).getUTCHours();
+        // Range check with wrap-around (handles windows that cross midnight IST)
+        const inWindow = startIST <= endIST
+          ? (istHour >= startIST && istHour <= endIST)
+          : (istHour >= startIST || istHour <= endIST);
+        if (inWindow && proposal.confidence < floor) {
+          const fmtH = (h: number) => {
+            const period = h < 12 ? 'AM' : 'PM';
+            const h12 = h % 12 === 0 ? 12 : h % 12;
+            return `${h12} ${period}`;
+          };
+          hardChecks.push(`Bleed window (${fmtH(istHour)} IST, set ${fmtH(startIST)}-${fmtH(endIST)}) requires ≥${floor}% confidence (got ${proposal.confidence}%)`);
+        }
+      }
+    } catch (err: any) {
+      console.error('[SENTINEL] Bleed-hour check failed (non-blocking):', err?.message);
     }
 
     if (hardChecks.length > 0) {
@@ -1145,7 +1221,7 @@ Do NOT reject trades based on:
 Approve if the risk parameters are sound.`;
 
     try {
-      const decision = await generateText('gemini-2.5-flash', prompt);
+      const decision = await generateTextForPurpose('sentinel', prompt, { userId: this.currentUserId ?? undefined });
       const approved = decision.toUpperCase().includes('APPROVED');
 
       if (approved) {

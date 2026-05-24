@@ -1,4 +1,4 @@
-import { generateText } from './modelRouter.ts';
+import { generateTextForPurpose } from './modelRouter.ts';
 
 export interface TradingGoal {
   id?: string;
@@ -55,7 +55,7 @@ Keep your response under 100 words. No markdown, no bullet points — just clean
 
     let strategy: string;
     try {
-      strategy = await generateText('gemini-2.5-flash', strategyPrompt);
+      strategy = await generateTextForPurpose('goal-strategy', strategyPrompt);
     } catch (err) {
       strategy = `Target: $${targetProfit} from $${capital} capital. Strategy: Diversified swing trading across top-10 crypto pairs. Risk max 2% per trade. Estimated timeframe: 2-4 weeks with moderate market conditions.`;
     }

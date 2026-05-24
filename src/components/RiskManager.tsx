@@ -17,6 +17,12 @@ interface RiskSettings {
   approvalTtlMinutes: number;
   approvalMaxDriftPercent: number;
   maxLiveCapital: number;
+  maxLeverage?: { crypto?: number; stock?: number };
+  bleedHoursEnabled?: boolean;
+  bleedStartHourIST?: number;  // 0-23
+  bleedEndHourIST?: number;    // 0-23
+  bleedConfidenceFloor?: number; // 60-100
+  autoNavigateTV?: boolean;    // Auto-flip TV chart to symbol swarm is analyzing
 }
 
 interface DashboardData {
@@ -60,6 +66,12 @@ export function RiskManager({ userId }: { userId: string }) {
     approvalTtlMinutes: 5,
     approvalMaxDriftPercent: 0.5,
     maxLiveCapital: 50,
+    maxLeverage: { crypto: 10, stock: 1 },
+    bleedHoursEnabled: true,
+    bleedStartHourIST: 17, // 5 PM IST
+    bleedEndHourIST: 0,    // 12 AM IST
+    bleedConfidenceFloor: 75,
+    autoNavigateTV: true,
   });
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [audit, setAudit] = useState<string | null>(null);
@@ -523,6 +535,154 @@ export function RiskManager({ userId }: { userId: string }) {
                       className="w-full bg-zinc-950 border border-red-500/40 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-red-500/50"
                     />
                     <p className="text-[9px] text-zinc-600 mt-1">Sum of all open live positions + this trade's notional must stay under this. Refuses orders that would breach it.</p>
+                  </div>
+                </div>
+
+                {/* ─── Bleed-Hours Filter (Phase 3) ─── */}
+                <div className="border-t border-purple-500/30 pt-4 mt-1">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert className="w-3.5 h-3.5 text-purple-400" />
+                      <span className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider">Bleed-Hour Filter (IST)</span>
+                      <span className="text-[9px] text-zinc-600">(during these hours, require higher conviction)</span>
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <span className="text-[10px] text-zinc-500 uppercase tracking-wide">Enabled</span>
+                      <input
+                        type="checkbox"
+                        checked={settings.bleedHoursEnabled !== false}
+                        onChange={e => setSettings({ ...settings, bleedHoursEnabled: e.target.checked })}
+                        className="w-4 h-4 accent-purple-500"
+                      />
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                        Start (IST)
+                      </label>
+                      <select
+                        value={settings.bleedStartHourIST ?? 17}
+                        onChange={e => setSettings({ ...settings, bleedStartHourIST: Number(e.target.value) })}
+                        disabled={settings.bleedHoursEnabled === false}
+                        className="w-full bg-zinc-950 border border-purple-500/40 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-purple-500/50 disabled:opacity-40"
+                      >
+                        {Array.from({ length: 24 }, (_, h) => {
+                          const period = h < 12 ? 'AM' : 'PM';
+                          const h12 = h % 12 === 0 ? 12 : h % 12;
+                          return <option key={h} value={h}>{h12}:00 {period}</option>;
+                        })}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                        End (IST)
+                      </label>
+                      <select
+                        value={settings.bleedEndHourIST ?? 0}
+                        onChange={e => setSettings({ ...settings, bleedEndHourIST: Number(e.target.value) })}
+                        disabled={settings.bleedHoursEnabled === false}
+                        className="w-full bg-zinc-950 border border-purple-500/40 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-purple-500/50 disabled:opacity-40"
+                      >
+                        {Array.from({ length: 24 }, (_, h) => {
+                          const period = h < 12 ? 'AM' : 'PM';
+                          const h12 = h % 12 === 0 ? 12 : h % 12;
+                          return <option key={h} value={h}>{h12}:00 {period}</option>;
+                        })}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                        Min Confidence
+                      </label>
+                      <input
+                        type="number"
+                        min={50}
+                        max={100}
+                        step={5}
+                        value={settings.bleedConfidenceFloor ?? 75}
+                        onChange={e => setSettings({ ...settings, bleedConfidenceFloor: Number(e.target.value) })}
+                        disabled={settings.bleedHoursEnabled === false}
+                        className="w-full bg-zinc-950 border border-purple-500/40 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-purple-500/50 disabled:opacity-40"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[9px] text-zinc-600 mt-2">
+                    {settings.bleedHoursEnabled === false
+                      ? 'Filter disabled — Sentinel uses standard 60% confidence floor at all times.'
+                      : (() => {
+                          const start = settings.bleedStartHourIST ?? 17;
+                          const end = settings.bleedEndHourIST ?? 0;
+                          const fmt = (h: number) => `${h % 12 === 0 ? 12 : h % 12}:00 ${h < 12 ? 'AM' : 'PM'}`;
+                          return `Active ${fmt(start)} → ${fmt(end)} IST. Trades during this window need ≥${settings.bleedConfidenceFloor ?? 75}% confidence. Your data: 5 PM–12 AM IST was your bleed (62 trades, net ~$-14).`;
+                        })()
+                    }
+                  </p>
+                </div>
+
+                {/* ─── TradingView Vision Section (Option C) ─── */}
+                <div className="border-t border-cyan-500/30 pt-4 mt-1">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert className="w-3.5 h-3.5 text-cyan-400" />
+                      <span className="text-[10px] font-semibold text-cyan-400 uppercase tracking-wider">TradingView Vision</span>
+                      <span className="text-[9px] text-zinc-600">(let swarm flip your TV chart to match what it's analyzing)</span>
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <span className="text-[10px] text-zinc-500 uppercase tracking-wide">Auto-Navigate</span>
+                      <input
+                        type="checkbox"
+                        checked={settings.autoNavigateTV !== false}
+                        onChange={e => setSettings({ ...settings, autoNavigateTV: e.target.checked })}
+                        className="w-4 h-4 accent-cyan-500"
+                      />
+                    </label>
+                  </div>
+                  <p className="text-[9px] text-zinc-600">
+                    {settings.autoNavigateTV !== false
+                      ? '✅ ON — swarm will navigate your TV chart to the analyzed symbol before running Vision. Best vision coverage, but the bot will change your chart away from whatever you were looking at.'
+                      : '⛔ OFF — Vision only fires when your TV chart happens to match what the swarm is analyzing. You stay in full control of your chart; vision rarely fires.'}
+                  </p>
+                </div>
+
+                {/* ─── Leverage Caps Section (Phase 9.3) ─── */}
+                <div className="border-t border-amber-500/30 pt-4 mt-1">
+                  <div className="flex items-center gap-2 mb-3">
+                    <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+                    <span className="text-[10px] font-semibold text-amber-400 uppercase tracking-wider">Leverage Caps</span>
+                    <span className="text-[9px] text-zinc-600">(per asset class — only enforced when leverage &gt; 1)</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                        Crypto Max Leverage
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={125}
+                        step={1}
+                        value={settings.maxLeverage?.crypto ?? 10}
+                        onChange={e => setSettings({ ...settings, maxLeverage: { ...(settings.maxLeverage || {}), crypto: Number(e.target.value) } })}
+                        className="w-full bg-zinc-950 border border-amber-500/40 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                      />
+                      <p className="text-[9px] text-zinc-600 mt-1">Default 10x. Refuses orders requesting more.</p>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">
+                        Stock Max Leverage
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={4}
+                        step={1}
+                        value={settings.maxLeverage?.stock ?? 1}
+                        onChange={e => setSettings({ ...settings, maxLeverage: { ...(settings.maxLeverage || {}), stock: Number(e.target.value) } })}
+                        className="w-full bg-zinc-950 border border-amber-500/40 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                      />
+                      <p className="text-[9px] text-zinc-600 mt-1">Default 1x (cash). Margin accounts up to 4x.</p>
+                    </div>
                   </div>
                 </div>
 

@@ -13,11 +13,33 @@ interface CoinData {
   score: number;
   rsi?: number;
   confluence?: string;
+  /** Multi-timeframe agreement % (0-100). Low = timeframes disagree. */
+  confluenceConfidence?: number;
+  /** Per-timeframe bias breakdown for the hover popover + dot indicators. */
+  timeframes?: Array<{ tf: string; bias: string; confidence: number }>;
   taSignal?: string;
   signal?: string;
   obv?: number;
   obvSlope?: 'up' | 'down' | 'flat';
   vwap?: number;
+}
+
+/** Bias → color for the per-timeframe dot indicators. */
+function biasColor(bias?: string): string {
+  if (bias === 'strong_buy') return 'bg-emerald-500';
+  if (bias === 'buy') return 'bg-emerald-500/60';
+  if (bias === 'strong_sell') return 'bg-red-500';
+  if (bias === 'sell') return 'bg-red-500/60';
+  return 'bg-zinc-600';
+}
+
+/** Bias → arrow/symbol for the popover. */
+function biasGlyph(bias?: string): string {
+  if (bias === 'strong_buy') return '▲▲';
+  if (bias === 'buy') return '▲';
+  if (bias === 'strong_sell') return '▼▼';
+  if (bias === 'sell') return '▼';
+  return '◆';
 }
 
 type SortKey = 'score' | 'change24h' | 'volume24h' | 'price';
@@ -434,7 +456,20 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
                     'bg-zinc-700/40'
                   }`} />
                   <div>
-                    <p className="text-white font-medium text-sm">{coin.symbol.replace('/USDT', '')}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-white font-medium text-sm">{coin.symbol.replace('/USDT', '')}</p>
+                      {/* 1H/4H/1D timeframe dots — divergence visible at a glance */}
+                      {coin.timeframes && coin.timeframes.length > 0 && (
+                        <div className="flex items-center gap-0.5" title={coin.timeframes.map(t => `${t.tf}: ${t.bias} (${t.confidence}%)`).join('  •  ')}>
+                          {coin.timeframes.map(t => (
+                            <span
+                              key={t.tf}
+                              className={`w-1.5 h-1.5 rounded-full ${biasColor(t.bias)}`}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1 mt-0.5">
                       {coin.rsi && <span className="text-[10px] text-zinc-500 mr-1.5">RSI: {coin.rsi}</span>}
                       {coin.vwap !== undefined && (
@@ -483,13 +518,59 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
                   </span>
                 </div>
 
-                {/* Unified Verdict — Signal + Score combined */}
-                <div className="col-span-4 flex items-center justify-end gap-2">
-                  <span className={`inline-flex items-center gap-1.5 text-[11px] font-bold border rounded-full px-3 py-1 ${verdict.bgColor} ${verdict.color}`}>
+                {/* Unified Verdict — Signal + Score combined (with hover popover) */}
+                <div className="col-span-4 flex items-center justify-end gap-2 relative group/score">
+                  <span className={`inline-flex items-center gap-1.5 text-[11px] font-bold border rounded-full px-3 py-1 ${verdict.bgColor} ${verdict.color} cursor-help`}>
                     <VerdictIcon type={verdict.icon} />
                     {verdict.label}
                     <span className="opacity-70 ml-0.5">{coin.score}</span>
                   </span>
+
+                  {/* Hover popover — shows the full breakdown the SCORE compresses */}
+                  {(coin.timeframes || coin.confluenceConfidence !== undefined) && (
+                    <div className="hidden group-hover/score:block absolute top-full right-0 mt-2 z-50 w-72 bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl p-3 text-left">
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-2">
+                        Score Breakdown
+                      </div>
+                      <div className="flex items-center justify-between mb-2 pb-2 border-b border-zinc-800">
+                        <span className="text-[11px] text-zinc-400">Confluence</span>
+                        <span className={`text-sm font-bold font-mono ${
+                          (coin.confluenceConfidence ?? 0) >= 80 ? 'text-emerald-400' :
+                          (coin.confluenceConfidence ?? 0) >= 60 ? 'text-amber-400' :
+                          'text-red-400'
+                        }`}>
+                          {coin.confluenceConfidence !== undefined ? `${coin.confluenceConfidence}%` : '—'}
+                        </span>
+                      </div>
+                      {coin.timeframes && coin.timeframes.length > 0 && (
+                        <div className="space-y-1.5">
+                          {coin.timeframes.map(t => (
+                            <div key={t.tf} className="flex items-center justify-between text-[11px]">
+                              <div className="flex items-center gap-2">
+                                <span className={`w-2 h-2 rounded-full ${biasColor(t.bias)}`} />
+                                <span className="text-zinc-300 font-mono">{t.tf}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className={`font-medium ${
+                                  t.bias === 'strong_buy' || t.bias === 'buy' ? 'text-emerald-400' :
+                                  t.bias === 'strong_sell' || t.bias === 'sell' ? 'text-red-400' :
+                                  'text-zinc-500'
+                                }`}>
+                                  {biasGlyph(t.bias)} {t.bias}
+                                </span>
+                                <span className="text-zinc-500 font-mono w-10 text-right">{t.confidence}%</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {coin.confluenceConfidence !== undefined && coin.confluenceConfidence < 70 && (
+                        <div className="mt-2 pt-2 border-t border-zinc-800 text-[10px] text-amber-400/80">
+                          ⚠️ Timeframes disagree — SCORE has been scaled down to reflect the divergence
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Arrow */}

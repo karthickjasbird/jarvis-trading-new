@@ -1,145 +1,95 @@
 # Jarvis AI Trading Terminal
 
-**An AI-powered autonomous trading assistant** that uses Gemini AI, real-time Binance market data, and a 6-agent swarm intelligence system to analyze markets, execute trades, and learn from every outcome.
+**An AI-powered autonomous trading assistant.** A multi-agent swarm scans markets (crypto + US stocks + commodity ETFs), runs risk checks, and either auto-executes trades or asks you to approve — controlled by voice or chat. Background engines monitor open positions, grade closed trades, and learn from outcomes.
+
+Single-user, runs locally. Built on Gemini AI + Firebase + Express + React.
 
 ---
 
-## 🚀 Quick Start (5 minutes)
+## Setup
 
-### Prerequisites
+Two paths to get running:
 
-- **Node.js v18+** — [Download here](https://nodejs.org/)
-- **A Google account** — for signing into the app
-- **A Gemini API Key** (free) — [Get one here](https://aistudio.google.com/apikey)
+- **Manual install** — follow [INSTALL.md](INSTALL.md). Target time: under 30 minutes from cloning to first scan.
+- **AI-assisted install** — open the cloned repo in any LLM IDE (Antigravity, Cursor, Claude Code, GitHub Copilot Chat) and paste [ANTIGRAVITY_SETUP.md](ANTIGRAVITY_SETUP.md) as your first prompt. The agent will ask you for each credential and configure everything.
 
-### Step 1: Clone & Install
-
-```bash
-git clone <repo-url> jarvis-trading
-cd jarvis-trading
-npm install
-```
-
-### Step 2: Configure Environment
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and fill in your **Gemini API key** (minimum required):
-
-```env
-GEMINI_API_KEY="your-gemini-api-key-here"
-```
-
-### Step 3: Add Firebase Credentials
-
-Place the `serviceAccountKey.json` file in the project root. *(You should have received this file from the project admin.)*
-
-### Step 4: Launch
-
-```bash
-npm run dev
-```
-
-Open **http://localhost:3000** in your browser.
-
-### Step 5: Set Your Owner ID
-
-1. Sign in with Google
-2. Click the **gear icon** (⚙️) to open Settings
-3. Find your **User ID** at the top — click **Copy**
-4. Paste it into your `.env` file:
-   ```env
-   OWNER_USER_ID="your-uid-here"
-   ```
-5. Restart the server (`Ctrl+C` then `npm run dev`)
-
-> **Why?** This ensures Jarvis only monitors YOUR trades. Without it, background engines may process other users' data if you're sharing the Firebase project.
+You'll need a Firebase project (free), a Gemini API key (free), and a Google account. Optional: Binance, Alpaca, Telegram, Groq.
 
 ---
 
-## 📋 Full Configuration
+## What Jarvis Does
 
-| Variable | Required | Where to Get It | What It Does |
-|----------|----------|-----------------|--------------|
-| `OWNER_USER_ID` | ✅ Yes | Settings page → Copy button | Scopes all background engines to YOUR data |
-| `GEMINI_API_KEY` | ✅ Yes | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Powers all AI features (chat, analysis, autonomous trading) |
-| `BINANCE_API_KEY` | ❌ Optional | [Binance API Management](https://www.binance.com/en/my/settings/api-management) | Required for live trading (paper trading works without it) |
-| `BINANCE_SECRET_KEY` | ❌ Optional | Same as above | Paired with Binance API Key |
-| `TELEGRAM_BOT_TOKEN` | ❌ Optional | [@BotFather](https://t.me/botfather) → `/newbot` | Personal trade alerts via Telegram |
-| `GROQ_API_KEY` | ❌ Optional | [console.groq.com](https://console.groq.com) | Fast fallback AI model (Llama 3.3) |
+### Agent Swarm
+Each trade goes through a multi-agent pipeline before execution:
 
----
+- **Scout** — scans 87 pairs (48 crypto + 33 stocks + 6 commodity ETFs) with real technical analysis
+- **Analyst** — deep multi-timeframe analysis on top candidates
+- **Scholar** — gathers live intel (Fear & Greed, BTC dominance, funding rates, news)
+- **Holistic** — synthesizes signals into a unified view
+- **Strategist** — builds ATR-based trade plans with position sizing
+- **Sentinel** — risk gatekeeper (portfolio heat, correlation, backtest validation)
+- **Executor** — places trades with Kelly Criterion sizing + deadline-aware strategy
 
-## 🧠 What Jarvis Does
-
-### Agent Swarm (6 AI Agents)
-- **Scout** — Scans markets with real technical analysis (RSI, MACD, EMA, ATR)
-- **Analyst** — Deep-dives into the top opportunity with multi-timeframe confluence
-- **Scholar** — Gathers live market intelligence (Fear & Greed, BTC dominance, funding rates)
-- **Strategist** — Builds ATR-based trade plans with position sizing
-- **Sentinel** — Risk management gatekeeper (portfolio heat, correlation guard, backtest validation)
-- **Executor** — Places trades with Kelly Criterion sizing + session quality adjustments
+Every decision (including vetoes) is logged to the **Trade Diary** for full audit.
 
 ### Autonomous Features
-- **Sentry Engine** — Monitors all open positions for SL/TP/trailing stops
-- **Position Monitor** — Closes stale trades, adjusts trailing stops
-- **Kill Switch** — Daily loss limit protection with automatic position closure
-- **Post-Mortem AI** — Analyzes every closed trade and stores lessons in memory
-- **Strategy Tracker** — Auto-disables strategies that underperform
+- **Sentry Engine** — monitors open positions for SL/TP/trailing stops
+- **Campaign Manager** — autonomous multi-trade campaigns toward a target (e.g. "make $200 from $5000 in 24 hours")
+- **Deadline-Aware Strategy Router** — maps remaining time to scalp/day/swing/position buckets
+- **Kill Switch** — daily loss limit with auto-close
+- **Post-Mortem AI** — grades every closed trade, stores lessons in vector memory
+- **Strategy Tracker** — auto-disables underperforming strategies
 
-### Chat & Voice
-- Live conversational AI via Gemini
-- Voice interaction support
-- Personal memory bank (Jarvis learns your preferences)
+### Interaction
+- Voice chat via Gemini Live (the orb)
+- Text chat in the sidebar
+- TradingView bridge — Jarvis can read the chart you're looking at
+- Telegram alerts (optional)
 
 ---
 
-## ⚠️ Important Disclaimer
+## Modes
 
-> **Jarvis is an AI-assisted trading tool, not a financial advisor.**
+- **Practice** (default) — paper trading, no real money, all engines run normally
+- **Copilot** — Jarvis proposes, you approve every trade
+- **Sentry** — fully autonomous within risk limits (live trading)
+
+Toggle Practice/Live and Copilot/Sentry independently from the top bar.
+
+---
+
+## Disclaimer
+
+> Jarvis is an AI-assisted trading tool, not a financial advisor.
 >
 > - Past performance does not guarantee future results
-> - Cryptocurrency trading carries significant risk of loss
+> - Crypto and equity trading carry significant risk of loss
 > - Never trade with money you can't afford to lose
-> - Always start with paper trading mode before going live
-> - Monitor your positions — AI is not infallible
+> - Start in Practice mode. Move to Live only after you've watched the bot's decisions long enough to trust them
+> - You're responsible for monitoring your positions — AI is not infallible
 
 ---
 
-## 🛠️ Troubleshooting
+## Stack
 
-### "Sentry index error" in console
-This is normal on first run. Click the Firebase index link printed in the error to create the required composite index. It takes ~2 minutes to build.
+- Frontend: React 19 + TypeScript, Vite, Tailwind v4, Motion, lightweight-charts
+- Backend: Express + TypeScript (`tsx`)
+- DB: Firebase Firestore + Firebase Auth (Google sign-in)
+- AI: Google Gemini primary, Groq Llama fallback
+- Exchanges: ccxt (Binance), Alpaca REST (US equities), KiteConnect (Zerodha)
+- Mobile: Capacitor (Android/iOS wrappers)
 
-### App stuck on "Connecting"
-- Check your Gemini API key is valid
-- Ensure you haven't hit the free tier rate limit (10 RPM for free keys)
-
-### Port 3000 already in use
-```bash
-lsof -ti :3000 | xargs kill -9
-npm run dev
-```
-
----
-
-## 📁 Project Structure
+## Project Structure
 
 ```
-├── server.ts           # Express server + all background engines
-├── engine/
-│   ├── sentry.ts       # Real-time trade monitoring
-│   ├── agentSwarm.ts   # 6-agent AI trading pipeline
-│   ├── modelRouter.ts  # Gemini/Groq API routing
-│   ├── memory.ts       # Vector memory bank
-│   ├── telegram.ts     # Telegram notifications
-│   ├── userSecrets.ts  # Per-user API key management
-│   └── ...
+├── server.ts                 # Express server + API routes + background engines
+├── engine/                   # 29 backend modules (trade lifecycle, risk, ML)
 ├── src/
-│   ├── components/     # React UI components
-│   └── hooks/          # React hooks (live connection, etc.)
-├── .env.example        # Environment template
-└── serviceAccountKey.json  # Firebase credentials (not in git)
+│   ├── App.tsx
+│   ├── components/           # React UI
+│   └── hooks/                # voice (useJarvisLive), trades, market data
+├── INSTALL.md                # full setup guide
+└── ANTIGRAVITY_SETUP.md      # AI-assisted setup prompt
 ```
+
+For a complete map of which file handles what, see [CLAUDE.md](CLAUDE.md).

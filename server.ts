@@ -8,6 +8,7 @@ import { KiteConnect } from "kiteconnect";
 import { WebSocketServer } from "ws";
 import fs from "fs";
 import { TradeExecutor } from "./engine/tradeExecutor.ts";
+import { RiskGate } from "./engine/riskGate.ts";
 import { SentryEngine } from "./engine/sentry.ts";
 import { MemoryManager } from "./engine/memory.ts";
 import { MarketScraper } from "./engine/scraper.ts";
@@ -28,8 +29,11 @@ import { analyzeChart, analyzeChartMultiTimeframe } from "./engine/tvVision.ts";
 import { BinancePriceFeed } from "./engine/binancePriceFeed.ts";
 import { UserSecretsManager } from "./engine/userSecrets.ts";
 import { RSI, MACD, EMA } from "technicalindicators";
-import { generateText } from "./engine/modelRouter.ts";
+import { generateTextForPurpose } from "./engine/modelRouter.ts";
 import { generateAppManifest, formatManifestForPrompt } from "./engine/manifestGenerator.ts";
+import { isHalted, halt, resume } from "./engine/killSwitch.ts";
+import { runBacktest } from "./engine/backtestEngine.ts";
+import { init as initCostMeter, getSummary as getCostSummary } from "./engine/costMeter.ts";
 
 // Simple file logger
 const logFile = fs.createWriteStream("startup.log", { flags: "a" });
@@ -316,9 +320,17 @@ async function startServer() {
   const priceFeed = new BinancePriceFeed(marketState);
   priceFeed.start();
 
-  // --- TRADE EXECUTION ENGINE & MEMORY BANK ---
-  const tradeExecutor = new TradeExecutor(db, marketState);
+  // --- COST METER (Phase 9.2) ---
+  initCostMeter(db);
+
+  // --- RISK GATE (Phase 9.3) — single audit point for all opening trades ---
+  const riskGate = new RiskGate(db, marketState);
+
+  // --- MEMORY BANK & TRADE EXECUTION ENGINE ---
+  // MemoryManager must be created BEFORE tradeExecutor so manual closes
+  // (closePosition) can fire post-mortems with embeddings into vector memory.
   const memoryManager = new MemoryManager(db);
+  const tradeExecutor = new TradeExecutor(db, marketState, riskGate, memoryManager);
   const userSecrets = new UserSecretsManager(db);
   const sentryEngine = new SentryEngine(db, tradeExecutor, marketState, memoryManager, OWNER_USER_ID);
   const scraper = new MarketScraper(memoryManager, db);
@@ -335,10 +347,47 @@ async function startServer() {
   const confidenceEngine = new ConfidenceEngine(db);
   const postMortemEngine = new PostMortemEngine(db, memoryManager, tradeDiary);
 
+  // ─── STARTUP MANIFEST — what's actually running ───
+  // Post-audit transparency: log every engine + its trigger mechanism so
+  // future "is X working?" questions can be answered from startup.log alone.
+  log(`Engines initialized:`);
+  log(`  ✓ CostMeter (cost telemetry, persists to apiUsage collection)`);
+  log(`  ✓ RiskGate (kill switch + 5 caps: notional, concurrent, live, leverage, daily-loss)`);
+  log(`  ✓ MemoryManager (Gemini embeddings → users/{uid}/memories)`);
+  log(`  ✓ TradeExecutor (with riskGate + memoryManager; post-mortems on manual closes)`);
+  log(`  ✓ SentryEngine (WS price-update subscribed; polling monitor every 5s)`);
+  log(`  ✓ MarketScraper, WebAgent (placeholder), StrategyTracker (writes tradeOutcomes)`);
+  log(`  ✓ GoalPlanner (legacy — tradingGoals collection; SUPERSEDED by goalExecutor)`);
+  log(`  ✓ RegimeDetector, KellyCalculator, TradeDiaryEngine`);
+  log(`  ✓ AgentSwarm (6 agents: Scout, Analyst, Scholar, Holistic+TVVision, Strategist, Sentinel)`);
+  log(`  ✓ MarketScanner (48 crypto + 33 stocks + 6 commodity ETFs)`);
+  log(`  ✓ GoalExecutor / Campaign Manager (writes campaigns collection)`);
+  log(`  ✓ ConfidenceEngine (score 0-100 in /api/confidence/:userId report.score)`);
+  log(`  ✓ PostMortemEngine (with memoryManager + tradeDiary — closes feed both)`);
+
   // --- TRADINGVIEW BRIDGE (NEXUS Phase 4) ---
   // Lazy: doesn't attach until POST /api/tradingview/connect — so server boot
   // never depends on Chrome being open.
   const tvBridge = getTradingViewBridge(process.env.CHROME_DEBUG_URL);
+
+  // Option C — try to auto-connect on startup. Non-blocking. If Chrome isn't
+  // running with --remote-debugging-port=9222, this fails silently and the
+  // user can manually connect later via UI pill or POST /api/tradingview/connect.
+  // Without this, the bridge sat at connected=false forever (the "ghost feature"
+  // we discovered in the audit).
+  (async () => {
+    try {
+      await tvBridge.connect();
+      const h = await tvBridge.healthCheck();
+      if (h.connected) {
+        console.log(`[STARTUP] ✅ TradingView bridge auto-connected: ${h.tabTitle || 'tab open'}`);
+      } else {
+        console.log(`[STARTUP] ⚠️ TradingView bridge available but no Chrome tab found (start Chrome with --remote-debugging-port=9222 then click TV pill to connect)`);
+      }
+    } catch (err: any) {
+      console.log(`[STARTUP] ⚠️ TradingView bridge auto-connect failed (Chrome not running with debug port?): ${err?.message?.slice(0, 80) || 'unknown'}`);
+    }
+  })();
 
   // --- EVENT-DRIVEN SENTRY: React to every price tick from WebSocket ---
   priceFeed.on('price_update', ({ symbol, rawSymbol, price }) => {
@@ -401,6 +450,8 @@ async function startServer() {
   const { ApprovalExpiry } = await import('./engine/approvalExpiry.ts');
   const approvalExpiry = new ApprovalExpiry(db, marketState, OWNER_USER_ID);
   setInterval(() => approvalExpiry.sweep(), 30 * 1000);
+  log(`  ✓ ApprovalExpiry sweeper armed (30s cadence)`);
+  log(`  ✓ GoalExecutor monitor armed (60s campaign progress checks)`);
 
   // Autonomous scan-and-trigger loop
   let autonomousEnabled = true; // Toggle via /api/autonomous/toggle
@@ -976,6 +1027,58 @@ async function startServer() {
     }
   });
 
+  // --- COST TELEMETRY ROUTES (Phase 9.2) ---
+
+  app.get("/api/cost/summary", (_req, res) => {
+    res.json(getCostSummary());
+  });
+
+  app.get("/api/cost/today", (_req, res) => {
+    const summary = getCostSummary();
+    res.json({ today: summary.today, totalCalls: summary.totalCalls });
+  });
+
+  app.get("/api/cost/by-purpose", (_req, res) => {
+    res.json(getCostSummary().byPurpose);
+  });
+
+  // --- BACKTEST ROUTE (Phase 7 audit fix) ---
+  // Engine was already callable from Sentinel via runBacktest(); this exposes
+  // it over HTTP so the UI / manual probes can request a backtest.
+  app.get("/api/backtest", async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || 'BTC/USDT');
+      const strategy = (String(req.query.strategy || 'rsi')) as 'rsi' | 'macd';
+      const timeframe = String(req.query.timeframe || '1h');
+      const initialBalance = Number(req.query.initialBalance) || 10000;
+      const result = await runBacktest(symbol, strategy, timeframe, initialBalance);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- KILL SWITCH ROUTES (Phase 9.1) ---
+  // File-based panic button. Blocks NEW exposure (entries + campaign deploys).
+  // Closes remain unblocked so users can still exit positions while halted.
+
+  app.get("/api/halt/status", (_req, res) => {
+    res.json(isHalted());
+  });
+
+  app.post("/api/halt", (req, res) => {
+    const reason = (req.body?.reason as string) || 'manual halt via API';
+    const state = halt(reason);
+    console.log(`[KILL SWITCH] 🛑 Trading halted: ${reason}`);
+    res.json(state);
+  });
+
+  app.post("/api/resume", (_req, res) => {
+    const state = resume();
+    console.log(`[KILL SWITCH] ✅ Trading resumed`);
+    res.json(state);
+  });
+
   // --- AUTONOMOUS MODE ROUTES ---
 
   app.get("/api/autonomous/status", (_req, res) => {
@@ -1333,9 +1436,10 @@ async function startServer() {
   });
 
   // Get recent brain activity feed
-  app.get("/api/swarm/activity", async (_req, res) => {
+  app.get("/api/swarm/activity", async (req, res) => {
     try {
-      const activity = await agentSwarm.getRecentActivity(30);
+      const limit = Math.min(parseInt((req.query.limit as string) || '150', 10) || 150, 500);
+      const activity = await agentSwarm.getRecentActivity(limit);
       res.json({ activity });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1377,10 +1481,14 @@ async function startServer() {
   });
 
   // Get goals for a user
+  // Audit fix: POST /api/goals/create writes to `campaigns` collection (via
+  // goalExecutor.createCampaign), but this GET was reading from `tradingGoals`
+  // (via dead goalPlanner) — so the Goals card was ALWAYS empty regardless of
+  // how many campaigns the user created. Now both ends point at campaigns.
   app.get("/api/goals/:userId", async (req, res) => {
     try {
-      const goals = await goalPlanner.getGoals(req.params.userId);
-      res.json({ goals });
+      const campaigns = await goalExecutor.getUserCampaigns(req.params.userId);
+      res.json({ goals: campaigns });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -1587,6 +1695,49 @@ async function startServer() {
   });
 
   // --- MEMORY BANK ROUTES ---
+
+  // Phase 4 — Enroll Jarvis in the trading curriculum. Embeds 20 dense,
+  // keyword-rich lessons into the user's vector memory so Scholar's recall
+  // surfaces them during decisions. Idempotent — checks for existing
+  // `[CURRICULUM Class N` prefix and skips lessons already enrolled.
+  app.post("/api/memory/learn-curriculum", async (req, res) => {
+    const userId = req.body?.userId || OWNER_USER_ID;
+    if (!userId) return res.status(400).json({ error: "userId required" });
+    try {
+      const { CURRICULUM, lessonToMemoryText } = await import("./engine/curriculum.ts");
+
+      // Find existing curriculum lessons to skip
+      const existing = await memoryManager.listMemories(userId);
+      const enrolledIds = new Set(
+        existing
+          .filter((m: any) => /^\[CURRICULUM Class \d+/.test(m.text))
+          .map((m: any) => {
+            // Match "[CURRICULUM Class N · category] Title\n..." → derive lessonId
+            const titleMatch = m.text.match(/^\[CURRICULUM Class \d+ · \w+\] (.+?)\n/);
+            return titleMatch ? titleMatch[1] : '';
+          })
+      );
+
+      const results = { saved: 0, skipped: 0, total: CURRICULUM.length, savedTitles: [] as string[] };
+      for (const lesson of CURRICULUM) {
+        if (enrolledIds.has(lesson.title)) {
+          results.skipped++;
+          continue;
+        }
+        const text = lessonToMemoryText(lesson);
+        await memoryManager.saveMemory(userId, text, 'semantic');
+        results.saved++;
+        results.savedTitles.push(`Class ${lesson.class}: ${lesson.title}`);
+      }
+
+      console.log(`[CURRICULUM] Enrolled ${userId}: ${results.saved} new lessons, ${results.skipped} already known`);
+      res.json(results);
+    } catch (error: any) {
+      console.error("Failed to enroll curriculum:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/memory/save", async (req, res) => {
     const { userId, text, type } = req.body;
     if (!userId || !text) return res.status(400).json({ error: "userId and text are required" });
@@ -2032,7 +2183,6 @@ async function startServer() {
         });
       } catch {}
 
-      const { generateText } = await import('./engine/modelRouter.ts');
       const prompt = `You are Jarvis Risk Auditor. You ONLY recommend TIGHTENING risk, NEVER increasing it.
 
 Current Risk Settings:
@@ -2050,7 +2200,7 @@ Provide a brief risk assessment (3-4 bullet points max). Grade the settings A/B/
 Format: Start with "GRADE: X" on first line, then bullet points.
 Be specific. Reference the actual numbers.`;
 
-      const audit = await generateText('gemini-2.5-flash', prompt);
+      const audit = await generateTextForPurpose('risk-audit', prompt);
       res.json({ audit });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -2460,7 +2610,7 @@ DECISION RULES:
 
 Your response must start with LONG, SHORT, HOLD, or EXIT.`;
 
-      const response = await generateText('gemini-2.5-flash', prompt);
+      const response = await generateTextForPurpose('autonomous-decision', prompt);
       const cleaned = response.trim().toUpperCase();
       
       let action = 'HOLD';

@@ -552,7 +552,7 @@
 }
 
 .brain-feed-content {
-  max-height: 200px;
+  max-height: 60vh;
   overflow-y: auto;
   padding: 12px 20px;
   display: flex;
@@ -567,6 +567,7 @@
   font-size: 12px;
   font-family: var(--font-mono);
   line-height: 1.6;
+  flex-wrap: nowrap;
 }
 
 .brain-feed-time {
@@ -587,6 +588,11 @@
 
 .brain-feed-message {
   color: #d4d4d8;
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 /* Responsive */

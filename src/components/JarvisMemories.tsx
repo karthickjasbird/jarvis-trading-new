@@ -30,6 +30,7 @@ export function JarvisMemories({ userId }: { userId?: string }) {
   const [manualMemoryText, setManualMemoryText] = useState('');
   const [isInjecting, setIsInjecting] = useState(false);
   const [isMigrating, setIsMigrating] = useState(false);
+  const [isEnrolling, setIsEnrolling] = useState(false);
 
   const fetchMemories = async () => {
     if (!userId) return;
@@ -113,12 +114,39 @@ export function JarvisMemories({ userId }: { userId?: string }) {
     }
   };
 
+  const enrollCurriculum = async () => {
+    if (!userId) return;
+    setIsEnrolling(true);
+    toast.loading('🎓 Enrolling Jarvis in trading school...', { id: 'curriculum' });
+    try {
+      const res = await fetch('/api/memory/learn-curriculum', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId })
+      });
+      const data = await res.json();
+      if (data.error) {
+        toast.error(`Enrollment failed: ${data.error}`, { id: 'curriculum' });
+      } else if (data.saved === 0) {
+        toast.success(`🎓 Already enrolled — all ${data.total} lessons in memory`, { id: 'curriculum', duration: 4000 });
+      } else {
+        toast.success(`🎓 Enrolled! ${data.saved} new lessons added (${data.skipped} already known)`, { id: 'curriculum', duration: 4000 });
+      }
+      await fetchMemories();
+    } catch {
+      toast.error('Enrollment failed', { id: 'curriculum' });
+    } finally {
+      setIsEnrolling(false);
+    }
+  };
+
   // Compute stats
   const totalMemories = memories.length;
   const webStudiesCount = memories.filter(m => m.text.includes('Knowledge acquired from')).length;
   const tradeLessonsCount = memories.filter(m => m.text.includes('[TRADE LESSON]') || m.text.includes('Trade Lesson')).length;
   const userRulesCount = memories.filter(m => m.text.includes('[User Explicit Rule]')).length;
-  const generalMemoriesCount = totalMemories - webStudiesCount - tradeLessonsCount - userRulesCount;
+  const curriculumCount = memories.filter(m => m.text.includes('[CURRICULUM Class')).length;
+  const generalMemoriesCount = totalMemories - webStudiesCount - tradeLessonsCount - userRulesCount - curriculumCount;
 
   // Filter for search
   const filteredMemories = memories.filter(m => 
@@ -126,12 +154,14 @@ export function JarvisMemories({ userId }: { userId?: string }) {
   );
 
   const getMemoryIcon = (text: string) => {
+    if (text.includes('[CURRICULUM Class')) return <GraduationCap className="w-4 h-4 text-cyan-400" />;
     if (text.includes('Knowledge acquired from')) return <Globe className="w-4 h-4 text-blue-400" />;
     if (text.includes('[User Explicit Rule]')) return <ShieldCheck className="w-4 h-4 text-emerald-400" />;
     return <Database className="w-4 h-4 text-purple-400" />;
   };
 
   const getMemoryTag = (text: string) => {
+    if (text.includes('[CURRICULUM Class')) return { label: 'Curriculum', color: 'cyan' };
     if (text.includes('Knowledge acquired from')) return { label: 'Web Intel', color: 'blue' };
     if (text.includes('[User Explicit Rule]')) return { label: 'User Rule', color: 'emerald' };
     if (text.includes('[TRADE LESSON]') || text.includes('Trade Lesson')) return { label: 'Trade Lesson', color: 'amber' };
@@ -155,7 +185,16 @@ export function JarvisMemories({ userId }: { userId?: string }) {
         </div>
         
         <div className="flex items-center gap-3">
-          <button 
+          <button
+            onClick={enrollCurriculum}
+            disabled={isEnrolling}
+            className="px-4 py-2 bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 rounded-lg text-xs font-bold hover:bg-cyan-500/20 transition-colors disabled:opacity-50 flex items-center gap-2"
+            title="Enroll Jarvis in the trading curriculum (20 dense lessons across 10 classes — embedded into vector memory so Scholar's recall finds them during decisions)"
+          >
+            <GraduationCap className="w-3.5 h-3.5" />
+            {isEnrolling ? 'Enrolling...' : 'Send Jarvis to School'}
+          </button>
+          <button
             onClick={migrateMemories}
             disabled={isMigrating}
             className="px-4 py-2 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-lg text-xs font-bold hover:bg-amber-500/20 transition-colors disabled:opacity-50 flex items-center gap-2"

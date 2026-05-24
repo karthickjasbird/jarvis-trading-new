@@ -45,6 +45,23 @@ export class SentryEngine {
     this.goalExecutor = executor;
   }
 
+  /**
+   * Log a sentry event to brainActivity so it surfaces in the user-scoped
+   * brain feed UI. Previously sentry only console.log'd — invisible to UI.
+   * Fire-and-forget (errors swallowed) so logging never blocks a close.
+   */
+  private logBrain(userId: string, message: string, type: string = 'sentry_event', extra: Record<string, any> = {}): void {
+    if (!userId) return;
+    this.db.collection('brainActivity').add({
+      userId,
+      agent: 'sentry',
+      type,
+      message,
+      timestamp: new Date().toISOString(),
+      ...extra,
+    }).catch((err: any) => console.error('[SENTRY] brainActivity log failed:', err?.message));
+  }
+
   private getCircuitBreaker(userId: string) {
     if (!this.circuitBreakers.has(userId)) {
       this.circuitBreakers.set(userId, {
@@ -207,12 +224,19 @@ export class SentryEngine {
         }
       }
 
-      // Check Dollar Profit Target
+      // Check Dollar Profit Target — Phase 5: "let winners run"
+      // Previously this fired a 100% close, capping every winner at the target.
+      // Track record showed 74.6% of wins were <0.5% — that's this trigger
+      // pre-fix. Now it fires a 50% partial (first hit only) so the remainder
+      // can ride with the breakeven SL + trailing stop set inside
+      // partialClosePosition(). Profit target is cleared post-partial so it
+      // can't refire on the remainder.
       const effectiveProfitTarget = trade.profitTarget || this.cachedProfitTarget;
-      if (!shouldClose && effectiveProfitTarget) {
+      const hasPartialFired = (trade.partialExits || []).length > 0;
+      if (!shouldClose && effectiveProfitTarget && !hasPartialFired) {
         if (pnl >= effectiveProfitTarget) {
           shouldClose = true;
-          reason = `⚡ INSTANT PROFIT TARGET $${effectiveProfitTarget} reached (PnL: $${pnl.toFixed(2)})`;
+          reason = `⚡ PROFIT TARGET $${effectiveProfitTarget} reached (PnL: $${pnl.toFixed(2)}) — partial close, letting remainder run`;
         }
       }
 
@@ -248,11 +272,16 @@ export class SentryEngine {
         this.processingTrades.add(trade.id);
 
         console.log(`[SENTRY-WS] ${reason} — ${trade.symbol} (Trade ID: ${trade.id})`);
+        this.logBrain(trade.userId, `🛡️ ${reason} — ${trade.symbol}`, 'sentry_close', {
+          symbol: trade.symbol, tradeId: trade.id, reason,
+        });
 
         try {
-          // Handle partial close on first TP hit
-          if (reason.includes('TP HIT') && (!trade.partialExits || trade.partialExits.length === 0)) {
-            console.log(`[SENTRY-WS] 🎯 TP1 hit — executing 50% partial close for ${trade.symbol}`);
+          // Handle partial close on first TP hit OR profit-target first-hit (Phase 5)
+          const isFirstPartialFire = (!trade.partialExits || trade.partialExits.length === 0) &&
+            (reason.includes('TP HIT') || reason.includes('PROFIT TARGET'));
+          if (isFirstPartialFire) {
+            console.log(`[SENTRY-WS] 🎯 First partial trigger — executing 50% partial close for ${trade.symbol} (reason: ${reason})`);
             await this.tradeExecutor.partialClosePosition(trade.userId, trade.id, 50);
           } else {
             // Full close
@@ -261,7 +290,10 @@ export class SentryEngine {
 
             // Fire post-trade automations
             try {
-              const postMortemEngine = new PostMortemEngine(this.db);
+              // Pass memoryManager + userId so the lesson gets embedded into the
+              // user's vector memory (otherwise it falls through to the legacy
+              // unembedded collection and Scholar's recall never sees it).
+              const postMortemEngine = new PostMortemEngine(this.db, this.memoryManager);
               const strategyTracker = new StrategyTracker(this.db);
               const goalPlanner = new GoalPlanner(this.db);
               const confidenceEngine = new ConfidenceEngine(this.db);
@@ -275,6 +307,7 @@ export class SentryEngine {
                 pnl: result.realizedPnl || 0,
                 pnlPercent: trade.entryPrice > 0 ? ((result.realizedPnl || 0) / (trade.entryPrice * trade.quantity)) * 100 : 0,
                 closeReason: reason,
+                userId: trade.userId,
               });
 
               await strategyTracker.recordOutcome({
@@ -496,6 +529,7 @@ export class SentryEngine {
             if (!trade.partialExits || trade.partialExits.length === 0) {
               // FIRST TP HIT → Partial close 50%, let rest ride
               console.log(`[SENTRY] 🎯 TP1 hit for ${trade.symbol} — executing 50% partial close`);
+              this.logBrain(trade.userId, `🎯 TP1 HIT — partial-closing 50% of ${trade.symbol} at $${currentPrice.toFixed(4)}`, 'sentry_partial_close', { symbol: trade.symbol, tradeId: doc.id, exitPrice: currentPrice });
               try {
                 await this.tradeExecutor.partialClosePosition(trade.userId, doc.id, 50);
                 // Don't set shouldClose — the remaining 50% stays open with trailing stop
@@ -550,16 +584,28 @@ export class SentryEngine {
           }
         }
 
-        // Check Dollar Profit Target
+        // Check Dollar Profit Target — Phase 5: "let winners run".
+        // First-hit triggers 50% partial close directly (same pattern as TP1
+        // above). partialClosePosition handles the breakeven SL, trailing stop,
+        // and clears profitTarget so this can't refire on the remainder. Older
+        // behavior closed 100% here — that's the bleed we're fixing.
         const effectiveProfitTarget = trade.profitTarget || this.cachedProfitTarget;
-        if (!shouldClose && effectiveProfitTarget) {
+        const hasPartialFired = (trade.partialExits || []).length > 0;
+        if (!shouldClose && effectiveProfitTarget && !hasPartialFired) {
           const isLong = trade.side === 'buy';
           const priceDiff = currentPrice - trade.entryPrice;
           const pnl = isLong ? (priceDiff * trade.quantity) : (-priceDiff * trade.quantity);
           if (pnl >= effectiveProfitTarget) {
-            shouldClose = true;
-            reason = `Profit Target $${effectiveProfitTarget} reached (P&L: $${pnl.toFixed(2)})`;
-            console.log(`[SENTRY] 💰 PROFIT TARGET HIT: ${trade.symbol} PNL $${pnl.toFixed(2)} >= target $${effectiveProfitTarget}`);
+            console.log(`[SENTRY] 💰 PROFIT TARGET HIT for ${trade.symbol} — executing 50% partial (PnL $${pnl.toFixed(2)} >= $${effectiveProfitTarget})`);
+            this.logBrain(trade.userId, `💰 PROFIT TARGET $${effectiveProfitTarget} HIT on ${trade.symbol} (PnL $${pnl.toFixed(2)}) — partial close, letting remainder run`, 'sentry_profit_target', { symbol: trade.symbol, tradeId: doc.id, pnl, target: effectiveProfitTarget });
+            try {
+              await this.tradeExecutor.partialClosePosition(trade.userId, doc.id, 50);
+              // Don't set shouldClose — remainder rides with trailing stop + breakeven SL
+            } catch (err: any) {
+              console.error(`[SENTRY] Profit-target partial close failed, doing full close:`, err.message);
+              shouldClose = true;
+              reason = `Profit Target $${effectiveProfitTarget} hit (partial failed, full exit)`;
+            }
           }
         }
 
@@ -572,6 +618,7 @@ export class SentryEngine {
           }
 
           console.log(`[SENTRY] Closing trade ${doc.id} for ${trade.userId}: ${reason}`);
+          this.logBrain(trade.userId, `🛡️ ${reason} — closing ${trade.symbol}`, 'sentry_close', { symbol: trade.symbol, tradeId: doc.id, reason });
           const result = await this.tradeExecutor.closePosition(trade.userId, doc.id);
 
           // Track outcome for circuit breaker
@@ -579,7 +626,10 @@ export class SentryEngine {
 
           // FIRE POST-TRADE AUTOMATIONS
           try {
-            const postMortemEngine = new PostMortemEngine(this.db);
+            // Pass memoryManager + userId so the lesson gets embedded into the
+            // user's vector memory (otherwise it falls through to the legacy
+            // unembedded collection and Scholar's recall never sees it).
+            const postMortemEngine = new PostMortemEngine(this.db, this.memoryManager);
             const strategyTracker = new StrategyTracker(this.db);
             const goalPlanner = new GoalPlanner(this.db);
             const confidenceEngine = new ConfidenceEngine(this.db);
@@ -594,6 +644,7 @@ export class SentryEngine {
               pnl: result.realizedPnl || 0,
               pnlPercent: trade.entryPrice > 0 ? ((result.realizedPnl || 0) / (trade.entryPrice * trade.quantity)) * 100 : 0,
               closeReason: reason,
+              userId: trade.userId,
             });
 
             // 2. Strategy Tracker

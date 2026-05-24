@@ -8,7 +8,11 @@ coverage/
 !.env.example
 .owner_user_id
 serviceAccountKey*.json
+!serviceAccountKey.example.json
 firebaseConfig.ts
+firebase-applet-config.json
+!firebase-applet-config.example.json
+HALT_TRADING
 
 # Test/debug artifacts — never commit
 *.png
