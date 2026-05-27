@@ -45,6 +45,15 @@ export function classifyCloseErrorMessage(rawErr: any): CloseErrorClassification
   // Binance:    -2010 "Account has insufficient balance for requested action"
   // Bybit:      "ab not enough for new order", "current position is zero"
   // Alpaca:     422 "insufficient buying power", 404 "position does not exist"
+  //
+  // Phase 9 (#11) — Duplicate clientOrderId detection. If the exchange rejects
+  // an order because we sent the same clientOrderId before, the previous
+  // attempt actually succeeded (or is in flight). Route to already_closed and
+  // let _verifyPositionGone confirm before reconciling. Different venues phrase
+  // this differently — pattern is defensive across known phrasings.
+  if (/duplicate.*client.*order.*id|duplicated.*record|order.*already.*exists|order.*has.*been.*sent.*already|client.*order.*id.*used|conflict.*client.*order|client_order_id.*already/i.test(msg)) {
+    return { kind: 'already_closed', reason: 'exchange rejected duplicate clientOrderId — prior attempt already succeeded' };
+  }
   if (/insufficient (balance|funds|buying power|margin)/.test(msg)) {
     return { kind: 'already_closed', reason: 'insufficient balance (position likely already closed)' };
   }
@@ -180,4 +189,47 @@ export function shouldSentrySkip(trade: { closeFailedAt?: string | null; closeFa
   if (isPermanentlyAbandoned(trade.closeFailureClass)) return true;
   if (isInRetryHold(trade.closeFailedAt, nowMs)) return true;
   return false;
+}
+
+/**
+ * Phase 9 (#11) — Deterministic clientOrderId generator for FULL close orders.
+ *
+ * Same tradeId always produces the same clientOrderId. This is the property
+ * that makes retries safe: when closeWithRetry fires the same close order N
+ * times (network blink, response lost, etc.), each attempt sends the same
+ * clientOrderId, and the exchange rejects all but the first with a
+ * "duplicate clientOrderId" error → classifier routes to already_closed →
+ * _verifyPositionGone confirms → reconcile. No double orders, ever.
+ *
+ * Format: "jvc-<tradeId-cleaned-first-28>"
+ * Length: max 32 chars (well under Binance 36 / Alpaca 48 / Bybit 36)
+ * Charset: [a-zA-Z0-9-] only — safe across every venue we use
+ *
+ * Retention note: Binance retains clientOrderIds for ~24h, Alpaca for several
+ * days, Bybit ~30 days. closeWithRetry's max retry window (3 cycles × 5min
+ * retry-hold + 7s of in-cycle backoff) is ~15 minutes total before
+ * needs_human, well inside every venue's window. No cross-day retry concerns.
+ */
+export function generateCloseClientOrderId(tradeId: string): string {
+  const safe = tradeId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 28);
+  return `jvc-${safe}`;
+}
+
+/**
+ * Phase 9 (#11) — Deterministic clientOrderId generator for PARTIAL close orders.
+ *
+ * A trade can have multiple partial closes over its life (e.g., 50% at TP1,
+ * then trailing stop on the remainder). Each partial is a DISTINCT exchange
+ * order, so each needs a unique clientOrderId — but retries WITHIN a single
+ * partial close should share the same ID for idempotency.
+ *
+ * The sequencing is keyed on `partialIndex` = `trade.partialExits.length` at
+ * the time of placement. First partial → index 0, second → index 1, etc.
+ *
+ * Format: "jvp-<tradeId-cleaned-first-24>-<index>"
+ * Length: max 31 chars for indices 0-9 (still safe across all venues).
+ */
+export function generatePartialClientOrderId(tradeId: string, partialIndex: number): string {
+  const safe = tradeId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 24);
+  return `jvp-${safe}-${partialIndex}`;
 }

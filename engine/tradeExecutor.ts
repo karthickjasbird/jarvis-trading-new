@@ -11,6 +11,8 @@ import {
   MAX_CLOSE_ATTEMPTS,
   MAX_RETRIES_EXHAUSTED_CYCLES,
   isPermanentlyAbandoned,
+  generateCloseClientOrderId,
+  generatePartialClientOrderId,
   type CloseErrorClassification,
 } from './closeRetry.ts';
 
@@ -350,6 +352,11 @@ export class TradeExecutor {
         const brokerConfig = brokerConfigsSnapshot.docs[0].data();
         const closeSide = data.side === 'buy' ? 'sell' : 'buy';
 
+        // Phase 9 (#11) — Deterministic clientOrderId for exchange-layer
+        // idempotency. Same tradeId → same ID → exchange rejects retries
+        // as duplicates → classifier routes to already_closed → reconcile.
+        const closeClientOrderId = generateCloseClientOrderId(tradeId);
+
         try {
           if (brokerConfig.brokerName === 'zerodha') {
             if (!brokerConfig.accessToken) throw new Error("Zerodha access token missing.");
@@ -362,7 +369,11 @@ export class TradeExecutor {
               transaction_type: closeSide.toUpperCase() as "BUY" | "SELL",
               quantity: data.quantity,
               product: "MIS",
-              order_type: "MARKET"
+              order_type: "MARKET",
+              // Zerodha tag = client-side tracking only (no server-side dedup).
+              // Max 20 chars. True idempotency on Zerodha requires application-
+              // layer verify, deferred to Tier B item #2.
+              tag: closeClientOrderId.slice(0, 20),
             });
             exitOrderId = order.order_id;
           } else if (['binance', 'bybit'].includes(brokerConfig.brokerName)) {
@@ -375,7 +386,10 @@ export class TradeExecutor {
 
             // LIVE MODE: Never use sandbox — user has explicitly switched to live/real money
 
-            const order = await exchange.createMarketOrder(data.symbol, closeSide, data.quantity);
+            const order = await exchange.createMarketOrder(
+              data.symbol, closeSide, data.quantity, undefined,
+              { newClientOrderId: closeClientOrderId }
+            );
             exitOrderId = order.id;
             currentPrice = order.average || order.price || currentPrice;
           } else if (brokerConfig.brokerName === 'alpaca') {
@@ -384,7 +398,10 @@ export class TradeExecutor {
               secretKey: brokerConfig.apiSecret,
               paper: false,
             });
-            const order = await alpaca.createMarketOrder(data.symbol, closeSide, data.quantity);
+            const order = await alpaca.createMarketOrder(
+              data.symbol, closeSide, data.quantity,
+              { clientOrderId: closeClientOrderId }
+            );
             exitOrderId = order.id;
             currentPrice = order.average ?? currentPrice;
           }
@@ -862,6 +879,12 @@ export class TradeExecutor {
       if (!brokerConfigsSnapshot.empty) {
         const brokerConfig = brokerConfigsSnapshot.docs[0].data();
         const closeSide = data.side === 'buy' ? 'sell' : 'buy';
+        // Phase 9 (#11) — Deterministic clientOrderId for partial close. Keyed
+        // on (tradeId, partialIndex) so each distinct partial gets its own ID,
+        // but retries within a single partial share the ID for exchange dedup.
+        const partialIndex = (data.partialExits || []).length;
+        const partialClientOrderId = generatePartialClientOrderId(tradeId, partialIndex);
+
         try {
           if (['binance', 'bybit'].includes(brokerConfig.brokerName)) {
             const exchangeClass = (ccxt as any)[brokerConfig.brokerName];
@@ -870,7 +893,10 @@ export class TradeExecutor {
               secret: brokerConfig.apiSecret,
               enableRateLimit: true,
             });
-            const order = await exchange.createMarketOrder(data.symbol, closeSide, closeQuantity);
+            const order = await exchange.createMarketOrder(
+              data.symbol, closeSide, closeQuantity, undefined,
+              { newClientOrderId: partialClientOrderId }
+            );
             exitOrderId = order.id;
             currentPrice = order.average || order.price || currentPrice;
           } else if (brokerConfig.brokerName === 'alpaca') {
@@ -879,7 +905,10 @@ export class TradeExecutor {
               secretKey: brokerConfig.apiSecret,
               paper: false,
             });
-            const order = await alpaca.createMarketOrder(data.symbol, closeSide, closeQuantity);
+            const order = await alpaca.createMarketOrder(
+              data.symbol, closeSide, closeQuantity,
+              { clientOrderId: partialClientOrderId }
+            );
             exitOrderId = order.id;
             currentPrice = order.average ?? currentPrice;
           }

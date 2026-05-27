@@ -190,16 +190,25 @@ export class AlpacaConnector {
    * the Kite path. Returns a normalized AlpacaOrder; caller can poll for
    * fill data if needed (Alpaca fills market orders very quickly in paper).
    */
-  async placeMarketOrder(symbol: string, side: 'buy' | 'sell', qty: number): Promise<AlpacaOrder> {
+  async placeMarketOrder(
+    symbol: string,
+    side: 'buy' | 'sell',
+    qty: number,
+    opts: { clientOrderId?: string } = {}
+  ): Promise<AlpacaOrder> {
     if (qty <= 0 || !Number.isFinite(qty)) {
       throw new Error(`[ALPACA] invalid qty: ${qty}`);
     }
+    // Phase 9 (#11) — optional client_order_id for exchange-layer idempotency.
+    // When provided, Alpaca rejects duplicate submissions within its retention
+    // window. closeRetry.ts generates these IDs deterministically per tradeId.
     const body = JSON.stringify({
       symbol,
       qty: String(qty),
       side,
       type: 'market',
       time_in_force: 'day',
+      ...(opts.clientOrderId ? { client_order_id: opts.clientOrderId } : {}),
     });
     return this.request<AlpacaOrder>(this.tradingHost, '/v2/orders', {
       method: 'POST',
@@ -214,13 +223,18 @@ export class AlpacaConnector {
    * `average` may be null immediately after submission; the caller should
    * fall back to its last-known price when it is.
    */
-  async createMarketOrder(symbol: string, side: 'buy' | 'sell', qty: number): Promise<{
+  async createMarketOrder(
+    symbol: string,
+    side: 'buy' | 'sell',
+    qty: number,
+    opts: { clientOrderId?: string } = {}
+  ): Promise<{
     id: string;
     average: number | null;
     filled: number;
     raw: AlpacaOrder;
   }> {
-    const order = await this.placeMarketOrder(symbol, side, qty);
+    const order = await this.placeMarketOrder(symbol, side, qty, opts);
     // Brief poll — Alpaca fills paper market orders within ~1s.
     let finalOrder = order;
     for (let i = 0; i < 5 && (!finalOrder.filled_avg_price || finalOrder.status === 'new'); i++) {
