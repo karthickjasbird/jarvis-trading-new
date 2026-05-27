@@ -55,6 +55,52 @@ export interface TradeProposal {
   reasoning: string;
   confidence: number;
   riskPercent: number;
+  // Phase 9 (0b) — organic R/R baseline captured BEFORE any auto-widen.
+  // Lets us measure how often the LLM naturally proposes a 1.5:1+ R/R, so
+  // when the widen block is deleted (#4) we can distinguish "no edge"
+  // from "gates too tight" by comparing pre- vs post-deletion pass rates.
+  organicRR?: number;
+  wouldPassOrganicRR?: boolean;
+}
+
+// Phase 9 (0b) — Per-proposal observability. Logged into `scanMetrics`
+// collection so we can quantify gate-by-gate pass rates over time.
+export type VetoCategory =
+  | 'low_confidence'
+  | 'poor_rr'
+  | 'risk_gate'
+  | 'correlation'
+  | 'portfolio_heat'
+  | 'backtest_weak'
+  | 'strategist_failed'
+  | 'other';
+
+export interface ProposalMetric {
+  symbol: string;
+  scoutScore: number;
+  holisticConviction: number | null;   // parsed "CONFIDENCE: NN" from holistic assessment
+  organicRR: number | null;             // R/R as LLM proposed it (pre-widen)
+  wouldPassOrganicRR: boolean;          // would the LLM's original R/R have cleared 1.5:1?
+  postWidenRR: number | null;           // R/R after auto-widen runs (currently always >=1.5; trivial once #4 ships)
+  proposalConfidence: number | null;    // Strategist's reported confidence on the final proposal
+  sentinelApproved: boolean;
+  sentinelVetoReason?: string;
+  vetoCategory?: VetoCategory;
+}
+
+function categorizeVeto(reason: string): VetoCategory {
+  if (/Confidence too low/i.test(reason)) return 'low_confidence';
+  if (/Poor R\/R/i.test(reason)) return 'poor_rr';
+  if (/Kill Switch|Daily loss|Live capital|Notional cap|Concurrent cap|Leverage cap/i.test(reason)) return 'risk_gate';
+  if (/Correlation/i.test(reason)) return 'correlation';
+  if (/Portfolio/i.test(reason)) return 'portfolio_heat';
+  if (/Backtest/i.test(reason)) return 'backtest_weak';
+  return 'other';
+}
+
+function parseHolisticConfidence(assessment: string): number | null {
+  const m = assessment.match(/CONFIDENCE:\s*(\d+)/i);
+  return m ? parseInt(m[1], 10) : null;
 }
 
 export class AgentSwarm {
@@ -153,12 +199,50 @@ export class AgentSwarm {
     await this.log('system', `🧠 Agent Swarm pipeline initiated${targetLabel}...`, 'info');
 
     try {
-      // 0. REGIME DETECTION — Classify market conditions BEFORE scanning
+      // 0. REGIME DETECTION — Classify market conditions BEFORE scanning.
+      //
+      // Phase 9 (#7) — Asset-class-aware. Stocks/ETFs are gated by SPY 4H
+      // regime (not BTC). The Alpaca market clock is checked FIRST: if the
+      // US session is closed, return a `market_closed` block WITHOUT
+      // computing indicators — zero-volume flat off-hours bars make
+      // ATR/ADX degenerate (ATR → ~0), which then poisons SL/TP sizing
+      // downstream, not just the regime call.
       let regimeContext: RegimeResult | null = null;
       try {
-        const regimeSymbol = targetSymbol
-          ? (targetSymbol.includes('/') ? targetSymbol : targetSymbol.replace(/USDT$/, '/USDT'))
-          : 'BTC/USDT'; // Use BTC as proxy for overall market regime
+        // Detect asset class from the target symbol
+        const symbolUpper = (targetSymbol || '').toUpperCase();
+        const isStock = !!targetSymbol && !symbolUpper.includes('USDT') && !symbolUpper.includes('/') && /^[A-Z]{1,5}$/.test(symbolUpper);
+
+        // Stocks: clock-guard first, then SPY regime
+        if (isStock) {
+          const marketOpen = await this.marketScanner.isUSMarketOpen(userId);
+          if (marketOpen === false) {
+            const reason = 'US market is closed — skipping pipeline (off-hours bars produce degenerate ATR/ADX)';
+            await this.log('regime', `🕒 ${reason}`, 'veto');
+            await this.tradeDiary.logDecision(userId, {
+              timestamp: new Date().toISOString(),
+              userId,
+              symbol: targetSymbol || 'STOCK',
+              side: 'none',
+              decision: 'vetoed_regime_gate',
+              reasoning: reason,
+              indicators: { price: 0, rsi: null, macdHistogram: null, ema9: null, ema21: null, vwap: null, obvSlope: null, adx: null, atr: null },
+              regime: 'unknown',
+              riskCheck: { portfolioHeat: 0, openPositions: 0, dailyPnl: 0 },
+              confidence: 0,
+            });
+            return { executed: false, reason };
+          }
+          // marketOpen === null means creds unavailable — proceed with regime detection
+          // (degraded mode); marketOpen === true is the happy path.
+        }
+
+        const regimeSymbol = isStock
+          ? 'SPY' // US equities benchmark
+          : (targetSymbol
+              ? (targetSymbol.includes('/') ? targetSymbol : targetSymbol.replace(/USDT$/, '/USDT'))
+              : 'BTC/USDT'); // crypto-wide proxy
+
         regimeContext = await this.regimeDetector.detectRegime(regimeSymbol, '4h');
 
         await this.log('regime', 
@@ -229,142 +313,341 @@ export class AgentSwarm {
         return { executed: false, reason: 'No opportunities found by Scout' };
       }
 
-      const topPick = scoutResult.opportunities[0];
-      const cachedTA = scoutResult.taReports?.[topPick.symbol]; // ✅ CACHED — no re-fetch
+      // Phase 8 Fix — Multi-pick fallback loop. Previously only opportunities[0]
+      // reached Analyst→Sentinel; one veto killed the whole scan and the next 4
+      // ranked picks were discarded. Now we evaluate the top N (capped) and
+      // surface every Sentinel-approved candidate as a pending approval so
+      // Karthick can pick which to execute.
+      const MAX_PICKS_TO_TRY = 3;
+      const MIN_SCOUT_CONFIDENCE = 45;
 
-      // 2 + 3. ANALYST + SCHOLAR — Run in PARALLEL (they don't depend on each other)
-      const [analystResult, scholarResult] = await Promise.all([
-        this.runAnalyst(topPick, cachedTA, identityContext),                       // Uses cached TA — no HTTP calls
-        this.runScholar(topPick.symbol, this.currentUserId, identityContext),      // Fetches intel + trade lessons
-      ]);
+      const picksToTry = scoutResult.opportunities
+        .filter(o => o.score >= MIN_SCOUT_CONFIDENCE)
+        .slice(0, MAX_PICKS_TO_TRY);
 
-      // 3.5. HOLISTIC AGENT — Full-context conviction assessment (sees EVERYTHING at once)
-      const holisticAssessment = await this.runHolistic(
-        topPick,
-        analystResult,
-        scholarResult,
-        cachedTA,
-        regimeContext,
-        userId,
-        identityContext
+      if (picksToTry.length === 0) {
+        await this.log('scout', `🔍 No picks above ${MIN_SCOUT_CONFIDENCE}% Scout confidence — skipping deep analysis.`, 'info');
+        return { executed: false, reason: `No picks above ${MIN_SCOUT_CONFIDENCE}% Scout confidence` };
+      }
+
+      await this.log('system',
+        `🎯 Evaluating top ${picksToTry.length} pick${picksToTry.length > 1 ? 's' : ''}: ${picksToTry.map(p => `${p.symbol} (${p.score}%)`).join(', ')}`,
+        'info'
       );
 
-      // 4. STRATEGIST — Build trade plan (uses cached TA for ATR data + regime multipliers + holistic conviction)
-      const proposal = await this.runStrategist(topPick, analystResult, scholarResult, cachedTA, regimeContext, identityContext, holisticAssessment);
-      if (!proposal) {
-        await this.log('strategist', '⚠️ Could not formulate a viable trade plan.', 'info');
-        return { executed: false, reason: 'Strategist could not create a plan' };
-      }
+      const approvedProposals: Array<{ proposal: TradeProposal; cachedTA: any }> = [];
+      const vetoReasons: string[] = [];
+      const proposalMetrics: ProposalMetric[] = []; // Phase 9 (0b) — per-pick observability
 
-      // 5. SENTINEL — Risk check, APPROVE or VETO (with regime awareness + diary injection)
-      const sentinelDecision = await this.runSentinel(proposal, isPractice, regimeContext, identityContext, userId);
-      if (!sentinelDecision.approved) {
+      for (let i = 0; i < picksToTry.length; i++) {
+        const pick = picksToTry[i];
+        const cachedTA = scoutResult.taReports?.[pick.symbol]; // CACHED — no re-fetch
 
-        // DIARY: Log sentinel veto with indicator snapshot
-        const vetoIndicators = this.extractIndicatorsFromTA(cachedTA);
-        await this.tradeDiary.logDecision(userId, {
-          timestamp: new Date().toISOString(),
-          userId,
-          symbol: proposal.symbol,
-          side: proposal.side,
-          decision: sentinelDecision.reason.includes('Backtest') ? 'vetoed_backtest' : sentinelDecision.reason.includes('Portfolio') || sentinelDecision.reason.includes('Correlation') ? 'vetoed_sentinel_risk' : 'vetoed_sentinel_ai',
-          reasoning: sentinelDecision.reason,
-          indicators: vetoIndicators,
-          regime: (regimeContext?.regime as TradeDiaryEntry['regime']) || 'unknown',
-          riskCheck: { portfolioHeat: 0, openPositions: 0, dailyPnl: 0 },
-          confidence: proposal.confidence,
-        });
-
-        return { executed: false, proposal, reason: `Sentinel VETO: ${sentinelDecision.reason}` };
-      }
-
-      // 6. EXECUTOR — Place the trade (with Kelly sizing + regime position multiplier)
-      // APPROVAL GATE: If requireApproval is true, save as PENDING instead of executing
-      if (requireApproval) {
-        await this.log('executor', `⏳ AWAITING APPROVAL: ${proposal.side.toUpperCase()} ${proposal.symbol} @ $${proposal.entryPrice} | SL: $${proposal.stopLoss} | TP: $${proposal.takeProfit}`, 'info');
-
-        // Save as pending trade — user must approve from the dashboard
-        await this.db.collection('trades').add({
-          userId,
-          symbol: proposal.symbol,
-          side: proposal.side,
-          quantity: proposal.quantity,
-          entryPrice: proposal.entryPrice,
-          stopLossPrice: proposal.stopLoss,
-          takeProfitPrice: proposal.takeProfit,
-          reasoning: proposal.reasoning,
-          confidence: proposal.confidence,
-          mode: isPractice ? 'paper' : 'live',
-          isPractice: isPractice,
-          status: 'pending',
-          source: 'agent-swarm-auto',
-          regimeAtEntry: regimeContext?.regime || 'unknown',
-          profitTarget: pipelineProfitTarget > 0 ? pipelineProfitTarget : null,
-          createdAt: new Date().toISOString(),
-        });
-
-        // DIARY: Log as awaiting approval
-        const pendingIndicators = this.extractIndicatorsFromTA(cachedTA);
-        await this.tradeDiary.logDecision(userId, {
-          timestamp: new Date().toISOString(),
-          userId,
-          symbol: proposal.symbol,
-          side: proposal.side,
-          decision: 'pending_approval',
-          reasoning: `Auto-detected opportunity awaiting user approval: ${proposal.reasoning}`,
-          indicators: pendingIndicators,
-          regime: (regimeContext?.regime as TradeDiaryEntry['regime']) || 'unknown',
-          riskCheck: { portfolioHeat: 0, openPositions: 0, dailyPnl: 0 },
-          confidence: proposal.confidence,
-        });
-
-        // TELEGRAM: Notify user about pending trade
-        try {
-          const { sendTelegramNotification } = await import('./telegram.ts');
-          const rrRatio = proposal.stopLoss > 0 
-            ? ((proposal.takeProfit - proposal.entryPrice) / (proposal.entryPrice - proposal.stopLoss)).toFixed(1)
-            : '?';
-          await sendTelegramNotification(this.db, userId,
-            `⏳ <b>Trade Awaiting Your Approval</b>\n\n` +
-            `Asset: <b>${proposal.symbol}</b>\n` +
-            `Side: <b>${proposal.side.toUpperCase()}</b>\n` +
-            `Entry: <b>$${proposal.entryPrice}</b>\n` +
-            `Stop Loss: <b>$${proposal.stopLoss}</b>\n` +
-            `Take Profit: <b>$${proposal.takeProfit}</b>\n` +
-            `R/R: <b>${rrRatio}:1</b>\n` +
-            `Confidence: <b>${proposal.confidence}%</b>\n` +
-            `Regime: <b>${regimeContext?.regime || 'unknown'}</b>\n\n` +
-            `<i>${proposal.reasoning}</i>\n\n` +
-            `Open your dashboard to <b>Approve</b> or <b>Decline</b>.`
+        if (i > 0) {
+          await this.log('system',
+            `🔄 Evaluating pick #${i + 1} of ${picksToTry.length} — ${pick.symbol} (Scout ${pick.score}%)`,
+            'info'
           );
-        } catch {}
+        }
 
-        return { executed: false, proposal, reason: 'Trade pending user approval' };
+        // Phase 7 Fix B — per-symbol regime override (per-pick, not just top pick).
+        // Symbol may be in a different regime than overall market (e.g., NEAR
+        // VOLATILE while market is RANGING). Use symbol's own regime for SL/TP.
+        let effectiveRegime: RegimeResult | null = regimeContext;
+        try {
+          const symbolRegime = await this.regimeDetector.detectRegime(pick.symbol, '4h');
+          if (symbolRegime && (symbolRegime.confidence ?? 0) > 30) {
+            effectiveRegime = symbolRegime;
+            if (regimeContext && symbolRegime.regime !== regimeContext.regime) {
+              await this.log('regime',
+                `🔀 Per-symbol regime override: ${pick.symbol} is ${symbolRegime.regime.toUpperCase()} (${symbolRegime.confidence}%) — using this for SL/TP sizing instead of overall ${regimeContext.regime.toUpperCase()}`,
+                'info', { symbolRegime, overallRegime: regimeContext }
+              );
+            }
+          }
+        } catch (err: any) {
+          console.warn('[SWARM] Per-symbol regime detection failed, falling back to overall:', err?.message);
+        }
+
+        // ANALYST + SCHOLAR (parallel)
+        const [analystResult, scholarResult] = await Promise.all([
+          this.runAnalyst(pick, cachedTA, identityContext),
+          this.runScholar(pick.symbol, this.currentUserId, identityContext),
+        ]);
+
+        // HOLISTIC — full-context conviction
+        const holisticAssessment = await this.runHolistic(
+          pick,
+          analystResult,
+          scholarResult,
+          cachedTA,
+          effectiveRegime,
+          userId,
+          identityContext
+        );
+
+        // Phase 9 (0b/0c) — start building this pick's metric. holisticConviction
+        // is parsed from the "CONFIDENCE: NN" line in the assessment string.
+        const holisticConviction = parseHolisticConfidence(holisticAssessment);
+        const metric: ProposalMetric = {
+          symbol: pick.symbol,
+          scoutScore: pick.score,
+          holisticConviction,
+          organicRR: null,
+          wouldPassOrganicRR: false,
+          postWidenRR: null,
+          proposalConfidence: null,
+          sentinelApproved: false,
+        };
+
+        // STRATEGIST — build trade plan
+        const proposal = await this.runStrategist(pick, analystResult, scholarResult, cachedTA, effectiveRegime, identityContext, holisticAssessment);
+        if (!proposal) {
+          await this.log('strategist', `⚠️ Could not formulate a viable trade plan for ${pick.symbol}.`, 'info');
+          vetoReasons.push(`${pick.symbol}: Strategist could not create a plan`);
+          metric.sentinelVetoReason = 'Strategist could not build a plan';
+          metric.vetoCategory = 'strategist_failed';
+          proposalMetrics.push(metric);
+          continue;
+        }
+
+        // Populate proposal-derived metrics. organicRR was set inside runStrategist
+        // BEFORE the auto-widen ran, so this captures the LLM's actual proposal.
+        metric.organicRR = proposal.organicRR ?? null;
+        metric.wouldPassOrganicRR = proposal.wouldPassOrganicRR ?? false;
+        const finalSl = Math.abs(proposal.entryPrice - proposal.stopLoss);
+        const finalTp = Math.abs(proposal.takeProfit - proposal.entryPrice);
+        metric.postWidenRR = finalSl > 0 ? parseFloat((finalTp / finalSl).toFixed(2)) : null;
+        metric.proposalConfidence = proposal.confidence;
+
+        // SENTINEL — risk + AI confidence gate
+        const sentinelDecision = await this.runSentinel(proposal, isPractice, regimeContext, identityContext, userId);
+        if (!sentinelDecision.approved) {
+          // DIARY: Log sentinel veto with indicator snapshot
+          const vetoIndicators = this.extractIndicatorsFromTA(cachedTA);
+          await this.tradeDiary.logDecision(userId, {
+            timestamp: new Date().toISOString(),
+            userId,
+            symbol: proposal.symbol,
+            side: proposal.side,
+            decision: sentinelDecision.reason.includes('Backtest') ? 'vetoed_backtest' : sentinelDecision.reason.includes('Portfolio') || sentinelDecision.reason.includes('Correlation') ? 'vetoed_sentinel_risk' : 'vetoed_sentinel_ai',
+            reasoning: sentinelDecision.reason,
+            indicators: vetoIndicators,
+            regime: (regimeContext?.regime as TradeDiaryEntry['regime']) || 'unknown',
+            riskCheck: { portfolioHeat: 0, openPositions: 0, dailyPnl: 0 },
+            confidence: proposal.confidence,
+          });
+
+          vetoReasons.push(`${pick.symbol}: ${sentinelDecision.reason}`);
+          metric.sentinelVetoReason = sentinelDecision.reason;
+          metric.vetoCategory = categorizeVeto(sentinelDecision.reason);
+          proposalMetrics.push(metric);
+
+          // Hard stops — system-wide bans. Retrying with the next pick won't help.
+          if (/Kill Switch|Daily loss|Live capital cap|Notional cap|Concurrent cap/i.test(sentinelDecision.reason)) {
+            await this.writeScanMetrics(userId, regimeContext, picksToTry.length, proposalMetrics, 0);
+            return { executed: false, proposal, reason: `Sentinel VETO (hard stop): ${sentinelDecision.reason}` };
+          }
+
+          continue; // Per-symbol veto — try next pick
+        }
+
+        // APPROVED — collect, don't break. Keep evaluating remaining picks.
+        metric.sentinelApproved = true;
+        proposalMetrics.push(metric);
+        approvedProposals.push({ proposal, cachedTA });
+        await this.log('sentinel',
+          `✅ ${pick.symbol} APPROVED — added to candidate slate (${approvedProposals.length} so far)`,
+          'info'
+        );
       }
 
-      const executedIndicators = this.extractIndicatorsFromTA(cachedTA);
-      const diaryEntryId = await this.tradeDiary.logDecision(userId, {
-        timestamp: new Date().toISOString(),
-        userId,
-        symbol: proposal.symbol,
-        side: proposal.side,
-        decision: 'executed',
-        reasoning: proposal.reasoning,
-        indicators: executedIndicators,
-        regime: (regimeContext?.regime as TradeDiaryEntry['regime']) || 'unknown',
-        riskCheck: { portfolioHeat: 0, openPositions: 0, dailyPnl: 0 },
-        confidence: proposal.confidence,
-      });
+      // Phase 9 (0b) — Persist scan metrics for filter-pass-rate analysis
+      await this.writeScanMetrics(userId, regimeContext, picksToTry.length, proposalMetrics, approvedProposals.length);
 
-      await this.runExecutor(proposal, userId, isPractice, regimeContext, diaryEntryId, pipelineProfitTarget);
+      // All picks evaluated. Process results.
+      if (approvedProposals.length === 0) {
+        return { executed: false, reason: `All ${picksToTry.length} picks vetoed: ${vetoReasons.join(' | ')}` };
+      }
 
-      return { executed: true, proposal, reason: 'Trade executed successfully' };
+      if (requireApproval) {
+        // Copilot mode: save EVERY approved proposal as pending
+        for (const { proposal, cachedTA } of approvedProposals) {
+          await this.savePendingApproval(proposal, cachedTA, userId, isPractice, regimeContext, pipelineProfitTarget);
+        }
+        await this.log('executor',
+          `⏳ ${approvedProposals.length} APPROVAL CANDIDATE(S) AWAITING REVIEW: ${approvedProposals.map(a => a.proposal.symbol).join(', ')}`,
+          'info'
+        );
+        return {
+          executed: false,
+          proposal: approvedProposals[0].proposal,
+          reason: `${approvedProposals.length} trade${approvedProposals.length > 1 ? 's' : ''} pending user approval`
+        };
+      }
+
+      // Sentry mode: auto-execute only the FIRST approved (highest Scout score)
+      const first = approvedProposals[0];
+      return await this.executeProposal(first.proposal, first.cachedTA, userId, isPractice, regimeContext, pipelineProfitTarget);
 
     } catch (err: any) {
       await this.log('system', `❌ Pipeline error: ${err.message}`, 'error');
       return { executed: false, reason: err.message };
     } finally {
       this.isRunning = false;
+    }
+  }
+
+  // Save a Sentinel-approved proposal as a pending approval. Logs to diary,
+  // sends Telegram notification. Called per-proposal in Copilot mode so multiple
+  // candidates can surface from a single scan.
+  private async savePendingApproval(
+    proposal: TradeProposal,
+    cachedTA: any,
+    userId: string,
+    isPractice: boolean,
+    regimeContext: RegimeResult | null,
+    pipelineProfitTarget: number
+  ): Promise<void> {
+    await this.log('executor',
+      `⏳ AWAITING APPROVAL: ${proposal.side.toUpperCase()} ${proposal.symbol} @ $${proposal.entryPrice} | SL: $${proposal.stopLoss} | TP: $${proposal.takeProfit}`,
+      'info'
+    );
+
+    await this.db.collection('trades').add({
+      userId,
+      symbol: proposal.symbol,
+      side: proposal.side,
+      quantity: proposal.quantity,
+      entryPrice: proposal.entryPrice,
+      stopLossPrice: proposal.stopLoss,
+      takeProfitPrice: proposal.takeProfit,
+      reasoning: proposal.reasoning,
+      confidence: proposal.confidence,
+      mode: isPractice ? 'paper' : 'live',
+      isPractice: isPractice,
+      status: 'pending',
+      source: 'agent-swarm-auto',
+      regimeAtEntry: regimeContext?.regime || 'unknown',
+      profitTarget: pipelineProfitTarget > 0 ? pipelineProfitTarget : null,
+      createdAt: new Date().toISOString(),
+    });
+
+    const pendingIndicators = this.extractIndicatorsFromTA(cachedTA);
+    await this.tradeDiary.logDecision(userId, {
+      timestamp: new Date().toISOString(),
+      userId,
+      symbol: proposal.symbol,
+      side: proposal.side,
+      decision: 'pending_approval',
+      reasoning: `Auto-detected opportunity awaiting user approval: ${proposal.reasoning}`,
+      indicators: pendingIndicators,
+      regime: (regimeContext?.regime as TradeDiaryEntry['regime']) || 'unknown',
+      riskCheck: { portfolioHeat: 0, openPositions: 0, dailyPnl: 0 },
+      confidence: proposal.confidence,
+    });
+
+    try {
+      const { sendTelegramNotification } = await import('./telegram.ts');
+      const rrRatio = proposal.stopLoss > 0
+        ? ((proposal.takeProfit - proposal.entryPrice) / (proposal.entryPrice - proposal.stopLoss)).toFixed(1)
+        : '?';
+      await sendTelegramNotification(this.db, userId,
+        `⏳ <b>Trade Awaiting Your Approval</b>\n\n` +
+        `Asset: <b>${proposal.symbol}</b>\n` +
+        `Side: <b>${proposal.side.toUpperCase()}</b>\n` +
+        `Entry: <b>$${proposal.entryPrice}</b>\n` +
+        `Stop Loss: <b>$${proposal.stopLoss}</b>\n` +
+        `Take Profit: <b>$${proposal.takeProfit}</b>\n` +
+        `R/R: <b>${rrRatio}:1</b>\n` +
+        `Confidence: <b>${proposal.confidence}%</b>\n` +
+        `Regime: <b>${regimeContext?.regime || 'unknown'}</b>\n\n` +
+        `<i>${proposal.reasoning}</i>\n\n` +
+        `Open your dashboard to <b>Approve</b> or <b>Decline</b>.`
+      );
+    } catch {}
+  }
+
+  // Auto-execute a Sentinel-approved proposal in Sentry mode. Logs the diary
+  // entry then runs the Executor. Returns the runPipeline-shaped result.
+  private async executeProposal(
+    proposal: TradeProposal,
+    cachedTA: any,
+    userId: string,
+    isPractice: boolean,
+    regimeContext: RegimeResult | null,
+    pipelineProfitTarget: number
+  ): Promise<{ executed: boolean; proposal?: TradeProposal; reason: string }> {
+    const executedIndicators = this.extractIndicatorsFromTA(cachedTA);
+    const diaryEntryId = await this.tradeDiary.logDecision(userId, {
+      timestamp: new Date().toISOString(),
+      userId,
+      symbol: proposal.symbol,
+      side: proposal.side,
+      decision: 'executed',
+      reasoning: proposal.reasoning,
+      indicators: executedIndicators,
+      regime: (regimeContext?.regime as TradeDiaryEntry['regime']) || 'unknown',
+      riskCheck: { portfolioHeat: 0, openPositions: 0, dailyPnl: 0 },
+      confidence: proposal.confidence,
+    });
+
+    await this.runExecutor(proposal, userId, isPractice, regimeContext || undefined, diaryEntryId, pipelineProfitTarget);
+
+    return { executed: true, proposal, reason: 'Trade executed successfully' };
+  }
+
+  // Phase 9 (0b/0c) — Persist per-scan gate-by-gate metrics to Firestore for
+  // filter-pass-rate analysis over time. Fire-and-forget; never blocks the
+  // pipeline if the write fails.
+  private async writeScanMetrics(
+    userId: string,
+    regimeContext: RegimeResult | null,
+    picksEvaluated: number,
+    proposals: ProposalMetric[],
+    approvedCount: number
+  ): Promise<void> {
+    try {
+      // Roll up gate-by-gate aggregates so dashboard queries don't need to
+      // re-aggregate the array every read.
+      //
+      // Naming carefully: holisticConviction is the Holistic AGENT's "CONFIDENCE: NN"
+      // output (advisory, no hard gate). proposalConfidence is the STRATEGIST's
+      // number on the final trade plan (this is what Sentinel actually gates on
+      // at the 60% floor). They are different measurements at different points
+      // in the pipeline and they DISAGREE OFTEN. Separating them here so the
+      // vetoBreakdown is internally consistent — and exposing the gap as its
+      // own metric, since Holistic-vs-Strategist divergence is the real signal.
+      const holisticPass = proposals.filter(p => (p.holisticConviction ?? 0) >= 60).length;
+      const strategistPass = proposals.filter(p => (p.proposalConfidence ?? 0) >= 60).length;
+      const holisticHighStrategistLow = proposals.filter(
+        p => (p.holisticConviction ?? 0) >= 60 && (p.proposalConfidence ?? 100) < 60
+      ).length;
+      const aggregates = {
+        proposalsGenerated: proposals.filter(p => p.organicRR !== null).length,
+        passedOrganicRR: proposals.filter(p => p.wouldPassOrganicRR).length,
+        passedHolisticConviction: holisticPass, // advisory, doesn't actually gate
+        passedStrategistConfidence: strategistPass, // this is the real Sentinel gate
+        holisticHighStrategistLow, // Strategist disagrees: Holistic >= 60 but Strategist < 60
+        passedSentinel: proposals.filter(p => p.sentinelApproved).length,
+        vetoBreakdown: proposals.reduce<Record<string, number>>((acc, p) => {
+          if (p.vetoCategory) acc[p.vetoCategory] = (acc[p.vetoCategory] || 0) + 1;
+          return acc;
+        }, {}),
+      };
+
+      await this.db.collection('scanMetrics').add({
+        userId,
+        timestamp: new Date().toISOString(),
+        regimeOverall: regimeContext?.regime || 'unknown',
+        regimeConfidence: regimeContext?.confidence ?? null,
+        picksEvaluated,
+        approvedCount,
+        proposals,
+        aggregates,
+      });
+    } catch (err: any) {
+      console.warn('[SWARM] writeScanMetrics failed (non-blocking):', err?.message);
     }
   }
 
@@ -707,18 +990,28 @@ Keep under 100 words. Plain text. Reference the actual data.`;
         if (finalTicker === wanted) {
           await this.log('holistic', `👁️ Running Gemini Vision on chart (~15s)...`, 'info');
           const v = await analyzeChart(bridge, { symbol: opportunity.symbol });
-          const patternStr = v.patterns.length > 0
-            ? v.patterns.map(p => `${p.name} (${p.direction}, ${p.confidence})`).join('; ')
-            : 'none clearly visible';
-          visionContext = [
-            `Bias: ${v.bias} (conviction ${v.conviction}%)`,
-            `Structure: ${v.structure}`,
-            `Patterns: ${patternStr}`,
-            `Support: ${v.support.length > 0 ? '$' + v.support.join(', $') : 'n/a'}`,
-            `Resistance: ${v.resistance.length > 0 ? '$' + v.resistance.join(', $') : 'n/a'}`,
-            `Reasoning: ${v.reasoning}`,
-          ].join('\n');
-          await this.log('holistic', `👁️ Vision: ${v.bias} ${v.conviction}% | ${v.patterns.length} pattern(s)`, 'analysis', { vision: v });
+          // Phase 9 (#6) — distinguish "sanity-skipped" from "Vision ran and
+          // returned neutral". Both yield bias=neutral / conviction=0, but
+          // they're different conditions: the skip means we have NO Vision
+          // signal at all (don't inject into Holistic prompt), the run-neutral
+          // means Vision genuinely couldn't read the chart.
+          if (v.parseError === 'sanity_skipped') {
+            await this.log('holistic', `👁️ Vision SANITY-SKIPPED — TV bridge URL/symbol mismatch; Holistic will run without vision context.`, 'info', { vision: v });
+            visionContext = null;
+          } else {
+            const patternStr = v.patterns.length > 0
+              ? v.patterns.map(p => `${p.name} (${p.direction}, ${p.confidence})`).join('; ')
+              : 'none clearly visible';
+            visionContext = [
+              `Bias: ${v.bias} (conviction ${v.conviction}%)`,
+              `Structure: ${v.structure}`,
+              `Patterns: ${patternStr}`,
+              `Support: ${v.support.length > 0 ? '$' + v.support.join(', $') : 'n/a'}`,
+              `Resistance: ${v.resistance.length > 0 ? '$' + v.resistance.join(', $') : 'n/a'}`,
+              `Reasoning: ${v.reasoning}`,
+            ].join('\n');
+            await this.log('holistic', `👁️ Vision: ${v.bias} ${v.conviction}% | ${v.patterns.length} pattern(s)`, 'analysis', { vision: v });
+          }
         } else if (finalTicker) {
           await this.log('holistic', `👁️ TV on ${finalTicker}, analyzing ${wanted} — auto-nav ${autoNav ? 'failed' : 'OFF'}, skipping vision`, 'info');
         }
@@ -829,10 +1122,13 @@ KEY_RISK: [The single biggest risk to this trade in one sentence.]`;
         if (h4?.indicators.atr) {
           atrData += `\nATR(14) 4H: $${h4.indicators.atr.toFixed(4)}`;
         }
-        atrData += `\n\nSL RULE: Place stop-loss at ${(1.5 * slMultiplier).toFixed(1)}x ATR(1H) from entry.`;
-        atrData += `\nTP1 RULE: Take-profit 1 at ${(1.5 * tpMultiplier).toFixed(1)}x ATR — close 50%.`;
-        atrData += `\nTP2 RULE: Take-profit 2 at ${(3.0 * tpMultiplier).toFixed(1)}x ATR — let remaining run.`;
-        atrData += `\nSIZING RULE: Risk max 2% of $100,000 capital = $2,000 risk per trade.`;
+        atrData += `\n\nSL: Place stop-loss at ${(1.5 * slMultiplier).toFixed(1)}x ATR(1H) from entry.`;
+        atrData += `\n\nTAKE PROFIT (set this as \`takeProfit\` in your JSON):`;
+        atrData += `\nUse ${(3.0 * tpMultiplier).toFixed(1)}x ATR — the "let it run" target.`;
+        atrData += `\n(Note: Sentry will fire a 50% partial close automatically when profit hits the user's profitTarget — you do NOT need a separate TP1. Set the final \`takeProfit\` at the 3x ATR target.)`;
+        atrData += `\n\nR/R MINIMUM: Your proposal MUST satisfy (TP - entry) / (entry - SL) >= 1.5.`;
+        atrData += `\nIf you cannot construct a setup that meets this floor with the current indicators, set confidence to 0 and Sentinel will skip the trade. Do NOT propose a sub-1.5:1 R/R trade — it will be auto-vetoed.`;
+        atrData += `\n\nSIZING RULE: Risk max 2% of $100,000 capital = $2,000 risk per trade.`;
         atrData += `\nPosition size = $2,000 / (${(1.5 * slMultiplier).toFixed(1)} × ATR) = quantity in base asset.`;
 
         if (regime) {
@@ -936,6 +1232,24 @@ Rules:
       } else if (proposal.confidence < 50 && opportunity.score >= 80) {
         // Edge case: log the divergence but TRUST THE AI. This is the signal Karthick was missing.
         await this.log('strategist', `🤔 Scout ${opportunity.score}% but AI Strategist only ${proposal.confidence}% — trusting AI's full-context view (Sentinel will gate at 60%)`, 'info');
+      }
+
+      // Phase 9 (0b/#4) — Capture organic R/R. The previous auto-widen block
+      // was deleted (Phase 7 Fix C) — it was gaming the 1.5:1 gate by inflating
+      // TP rather than rejecting weak setups. Now sub-1.5:1 proposals fall
+      // through to Sentinel, which vetoes them cleanly; Phase 8's multi-pick
+      // loop then tries the next pick. Both AI peer reviewers (Gemini + Claude)
+      // independently flagged the auto-widen as the worst kind of fix.
+      const slDist = Math.abs(proposal.entryPrice - proposal.stopLoss);
+      const tpDist = Math.abs(proposal.takeProfit - proposal.entryPrice);
+      const rr = slDist > 0 ? tpDist / slDist : 0;
+      proposal.organicRR = parseFloat(rr.toFixed(2));
+      proposal.wouldPassOrganicRR = rr >= 1.5;
+      if (rr < 1.5 && slDist > 0) {
+        await this.log('strategist',
+          `⚠️ Strategist proposed sub-1.5:1 R/R (${rr.toFixed(2)}:1) — Sentinel will veto, falling through to next pick in the loop.`,
+          'info'
+        );
       }
 
       await this.log('strategist',
@@ -1118,22 +1432,22 @@ Rules:
       }
     }
 
-    // Phase 3 — time-of-day filter. Configurable via riskSettings
-    // (bleedHoursEnabled, bleedStartHourIST, bleedEndHourIST, bleedConfidenceFloor).
-    // Default: 5 PM - 12 AM IST requires ≥75% confidence. Track record showed
-    // 45/120 trades concentrated in this window with ~breakeven net P&L.
+    // Phase 9 (#10) — Bleed-hour filter DEMOTED from hard gate to advisory log.
+    // Original rule (5 PM - 12 AM IST requires ≥75% confidence) was derived
+    // from ~45 trades in that window — too small a sample per (hour × symbol
+    // × regime) bucket to justify a hard veto. Claude's peer review flagged
+    // this as overfitting. Default is now OFF; if a user explicitly opts in,
+    // it emits an advisory log only — no hardChecks push.
     try {
       const settingsDoc = await this.db.collection('riskSettings').doc(userId || '').get();
       const settings: any = settingsDoc.exists ? settingsDoc.data() : {};
-      const enabled = settings.bleedHoursEnabled !== false; // default ON
+      const enabled = settings.bleedHoursEnabled === true; // default OFF now
       if (enabled) {
-        const startIST = Number.isFinite(settings.bleedStartHourIST) ? settings.bleedStartHourIST : 17; // 5 PM
-        const endIST = Number.isFinite(settings.bleedEndHourIST) ? settings.bleedEndHourIST : 0; // 12 AM
+        const startIST = Number.isFinite(settings.bleedStartHourIST) ? settings.bleedStartHourIST : 17;
+        const endIST = Number.isFinite(settings.bleedEndHourIST) ? settings.bleedEndHourIST : 0;
         const floor = Number.isFinite(settings.bleedConfidenceFloor) ? settings.bleedConfidenceFloor : 75;
-        // Compute current IST hour (IST = UTC + 5:30)
         const istMs = Date.now() + 5.5 * 60 * 60 * 1000;
         const istHour = new Date(istMs).getUTCHours();
-        // Range check with wrap-around (handles windows that cross midnight IST)
         const inWindow = startIST <= endIST
           ? (istHour >= startIST && istHour <= endIST)
           : (istHour >= startIST || istHour <= endIST);
@@ -1143,11 +1457,14 @@ Rules:
             const h12 = h % 12 === 0 ? 12 : h % 12;
             return `${h12} ${period}`;
           };
-          hardChecks.push(`Bleed window (${fmtH(istHour)} IST, set ${fmtH(startIST)}-${fmtH(endIST)}) requires ≥${floor}% confidence (got ${proposal.confidence}%)`);
+          await this.log('sentinel',
+            `📒 Advisory only (not a veto): in bleed window ${fmtH(istHour)} IST (set ${fmtH(startIST)}-${fmtH(endIST)}), confidence ${proposal.confidence}% below ${floor}%. User opted into this advisory.`,
+            'info'
+          );
         }
       }
     } catch (err: any) {
-      console.error('[SENTINEL] Bleed-hour check failed (non-blocking):', err?.message);
+      console.error('[SENTINEL] Bleed-hour advisory failed (non-blocking):', err?.message);
     }
 
     if (hardChecks.length > 0) {

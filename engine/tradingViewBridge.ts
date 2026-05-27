@@ -208,11 +208,49 @@ export class TradingViewBridge {
    * Screenshot the TradingView tab — PNG/JPEG Buffer.
    * Pass `chartOnly: true` to crop to the chart pane.
    * Output feeds straight into Gemini Vision for Phase 6.
+   *
+   * Phase 9 (#6) — sanity-check the page state before capturing. If Chrome
+   * has been switched to a non-TradingView tab, or the page hasn't loaded a
+   * chart route, return `null` so the caller can skip Vision entirely
+   * instead of feeding a garbage screenshot to Gemini.
+   *
+   * Pass `expectedSymbol` (e.g. "ATOM/USDT") to additionally verify the chart
+   * is actually showing the symbol we asked for. Mismatch → null.
    */
-  async screenshot(opts: ScreenshotOptions = {}): Promise<Buffer> {
+  async screenshot(opts: ScreenshotOptions & { expectedSymbol?: string } = {}): Promise<Buffer | null> {
     const page = await this.requireTVTab();
     const type = opts.type ?? 'png';
     const quality = type === 'jpeg' ? (opts.quality ?? 80) : undefined;
+
+    // URL sanity — must be on a TradingView chart route, not Gmail/Twitter/etc.
+    try {
+      const url = page.url();
+      if (!/tradingview\.com\/chart/i.test(url)) {
+        console.warn(`[TV-BRIDGE] screenshot skipped — page is not a TV chart route (url=${url})`);
+        return null;
+      }
+    } catch (err: any) {
+      console.warn('[TV-BRIDGE] screenshot skipped — could not read page URL:', err?.message);
+      return null;
+    }
+
+    // Symbol sanity — if caller passed an expectedSymbol, verify the chart's
+    // current ticker matches. Uses the legend parser (cheap; same DOM read
+    // we already do for Phase 5 indicator extraction).
+    if (opts.expectedSymbol) {
+      try {
+        const legend = await this.getChartLegend();
+        const symbolItem = legend.find((it: ChartLegendItem) => it.isSymbol);
+        const onChart = (symbolItem?.title || '').toUpperCase();
+        const expected = opts.expectedSymbol.replace('/', '').toUpperCase();
+        if (onChart && !onChart.includes(expected)) {
+          console.warn(`[TV-BRIDGE] screenshot skipped — chart shows "${onChart}" but expected "${expected}"`);
+          return null;
+        }
+      } catch (err: any) {
+        console.warn('[TV-BRIDGE] symbol-sanity legend read failed (proceeding anyway):', err?.message);
+      }
+    }
 
     if (opts.chartOnly) {
       const chart = await this.locateChart(page);

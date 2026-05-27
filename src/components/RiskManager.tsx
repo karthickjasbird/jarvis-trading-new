@@ -62,12 +62,12 @@ export function RiskManager({ userId }: { userId: string }) {
     autoLiquidateThreshold: 300,
     maxOpenPositions: 5,
     capitalPerTrade: 8000,
-    profitTarget: 50,
+    profitTarget: 0,
     approvalTtlMinutes: 5,
     approvalMaxDriftPercent: 0.5,
     maxLiveCapital: 50,
     maxLeverage: { crypto: 10, stock: 1 },
-    bleedHoursEnabled: true,
+    bleedHoursEnabled: false, // Phase 9 (#10) — demoted to advisory; default OFF
     bleedStartHourIST: 17, // 5 PM IST
     bleedEndHourIST: 0,    // 12 AM IST
     bleedConfidenceFloor: 75,
@@ -504,13 +504,13 @@ export function RiskManager({ userId }: { userId: string }) {
                       </label>
                       <input
                         type="number"
-                        min={1}
+                        min={0}
                         step={1}
                         value={settings.profitTarget}
                         onChange={e => setSettings({ ...settings, profitTarget: Number(e.target.value) })}
                         className="w-full bg-zinc-950 border border-emerald-500/20 rounded-lg px-3 py-2.5 text-sm text-zinc-100 font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500/50"
                       />
-                      <p className="text-[9px] text-zinc-600 mt-1">Exit when profit hits this $ amount.</p>
+                      <p className="text-[9px] text-zinc-600 mt-1">Fires a 50% partial close (then trailing stop on the remainder) when profit hits this $ amount. Set to 0 to disable — Strategist's takeProfit price controls exits instead.</p>
                     </div>
                   </div>
                 </div>
@@ -543,8 +543,8 @@ export function RiskManager({ userId }: { userId: string }) {
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
                       <ShieldAlert className="w-3.5 h-3.5 text-purple-400" />
-                      <span className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider">Bleed-Hour Filter (IST)</span>
-                      <span className="text-[9px] text-zinc-600">(during these hours, require higher conviction)</span>
+                      <span className="text-[10px] font-semibold text-purple-400 uppercase tracking-wider">Bleed-Hour Filter (Advisory only)</span>
+                      <span className="text-[9px] text-zinc-600">(logs a note when conviction is below floor in window — no longer vetoes)</span>
                     </div>
                     <label className="flex items-center gap-2 cursor-pointer">
                       <span className="text-[10px] text-zinc-500 uppercase tracking-wide">Enabled</span>

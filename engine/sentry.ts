@@ -8,6 +8,7 @@ import { StrategyTracker } from './strategyTracker.ts';
 import { GoalPlanner } from './goalPlanner.ts';
 import { ConfidenceEngine } from './confidenceEngine.ts';
 import { ATRCalculator } from './atrCalculator.ts';
+import { shouldSentrySkip } from './closeRetry.ts';
 
 export class SentryEngine {
   private db: FirebaseFirestore.Firestore;
@@ -268,6 +269,14 @@ export class SentryEngine {
       }
 
       if (shouldClose) {
+        // Phase 9 (Tier B #3) — Combined skip check:
+        // (a) retry-hold (closeFailedAt within last 5 min) → quiet skip, will retry later
+        // (b) needs_human (closeFailureClass='needs_human') → PERMANENT skip, user must act
+        // shouldSentrySkip covers both cases. We already alerted at the failure time.
+        if (shouldSentrySkip(trade)) {
+          continue;
+        }
+
         // Mark as processing to prevent double-close
         this.processingTrades.add(trade.id);
 
@@ -284,8 +293,11 @@ export class SentryEngine {
             console.log(`[SENTRY-WS] 🎯 First partial trigger — executing 50% partial close for ${trade.symbol} (reason: ${reason})`);
             await this.tradeExecutor.partialClosePosition(trade.userId, trade.id, 50);
           } else {
-            // Full close
-            const result = await this.tradeExecutor.closePosition(trade.userId, trade.id);
+            // Full close — Phase 9 (Tier B #3) uses closeWithRetry, which:
+            //   - retries on transient errors (rate limit, network, 5xx)
+            //   - reconciles on confirmed already_closed (with exchange verify)
+            //   - alerts + sets closeFailedAt on permanent failure
+            const result = await this.tradeExecutor.closeWithRetry(trade.userId, trade.id);
             await this.trackTradeOutcome(result.realizedPnl || 0, trade.userId);
 
             // Fire post-trade automations
@@ -617,9 +629,28 @@ export class SentryEngine {
             continue;
           }
 
+          // Phase 9 (Tier B #3) — combined skip: retry-hold (transient) OR needs_human (terminal)
+          if (shouldSentrySkip(trade)) {
+            continue;
+          }
+
           console.log(`[SENTRY] Closing trade ${doc.id} for ${trade.userId}: ${reason}`);
           this.logBrain(trade.userId, `🛡️ ${reason} — closing ${trade.symbol}`, 'sentry_close', { symbol: trade.symbol, tradeId: doc.id, reason });
-          const result = await this.tradeExecutor.closePosition(trade.userId, doc.id);
+
+          // Phase 9 (Tier B #3) — closeWithRetry instead of bare closePosition.
+          // Wrapped in its own try/catch so one close failure doesn't kill the
+          // entire monitor cycle (previously the top-level catch swallowed it
+          // and skipped every remaining position in the cycle).
+          let result: any;
+          try {
+            result = await this.tradeExecutor.closeWithRetry(trade.userId, doc.id);
+          } catch (closeErr: any) {
+            // closeWithRetry already alerted via Telegram + brainActivity + set closeFailedAt.
+            // We just need to skip post-close automations for this trade and continue
+            // with the next open position in the monitor cycle.
+            console.error(`[SENTRY] closeWithRetry threw for ${trade.symbol} ${doc.id}: ${closeErr.message}`);
+            continue;
+          }
 
           // Track outcome for circuit breaker
           await this.trackTradeOutcome(result.realizedPnl || 0, trade.userId);

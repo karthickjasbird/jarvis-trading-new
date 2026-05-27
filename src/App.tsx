@@ -18,6 +18,7 @@ import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { RiskManager } from './components/RiskManager';
 import { JarvisBrain } from './components/JarvisBrain';
 import { JarvisMemories } from './components/JarvisMemories';
+import { TradeDiary } from './components/TradeDiary';
 import { useTrades } from './hooks/useTrades';
 import { useMarketIntel } from './hooks/useMarketIntel';
 import { auth } from './firebase';
@@ -92,7 +93,7 @@ export default function App() {
       setMemories(prev => prev.filter(m => m.id !== memoryId));
     }
   };
-  const [appState, setAppState] = useState<'home' | 'market' | 'history' | 'settings' | 'chart' | 'analytics' | 'risk' | 'brain' | 'memories'>('home');
+  const [appState, setAppState] = useState<'home' | 'market' | 'history' | 'settings' | 'chart' | 'analytics' | 'risk' | 'brain' | 'memories' | 'diary'>('home');
   const [textInput, setTextInput] = useState('');
   const [isPracticeMode, setIsPracticeMode] = useState(true); // Default to PRACTICE for safety
   const [selectedChartSymbol, setSelectedChartSymbol] = useState('BINANCE:BTCUSDT');
@@ -159,7 +160,7 @@ export default function App() {
   const { news, whaleAlerts } = useMarketIntel();
 
   const handleNavigate = useCallback((destination: string) => {
-    if (['home', 'market', 'history', 'settings', 'chart', 'analytics', 'risk', 'brain', 'memories'].includes(destination)) {
+    if (['home', 'market', 'history', 'settings', 'chart', 'analytics', 'risk', 'brain', 'memories', 'diary'].includes(destination)) {
       setAppState(destination as any);
       if (destination === 'settings') {
         setShowBrokerSettings(true);
@@ -506,7 +507,7 @@ export default function App() {
                 transition={{ duration: 0.15 }}
                 className="absolute top-full left-1/2 -translate-x-1/2 mt-2 flex flex-col gap-1 bg-zinc-900/95 backdrop-blur-md border border-zinc-800 rounded-2xl p-2 min-w-[160px] shadow-2xl"
               >
-                {(['home', 'market', 'chart', 'analytics', 'risk', 'brain', 'memories', 'history'] as const).map((tab) => (
+                {(['home', 'market', 'chart', 'analytics', 'risk', 'brain', 'memories', 'diary', 'history'] as const).map((tab) => (
                   <button
                     key={tab}
                     id={`tab-${tab}`}
@@ -948,7 +949,7 @@ export default function App() {
         )}
 
         {appState === 'memories' && (
-          <motion.div 
+          <motion.div
             key="memories"
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -956,6 +957,18 @@ export default function App() {
             className="absolute inset-0 z-10 pt-16 pb-32"
           >
             <JarvisMemories userId={user.uid} />
+          </motion.div>
+        )}
+
+        {appState === 'diary' && (
+          <motion.div
+            key="diary"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="absolute inset-0 z-10 pt-16 pb-32"
+          >
+            <TradeDiary userId={user.uid} />
           </motion.div>
         )}
 

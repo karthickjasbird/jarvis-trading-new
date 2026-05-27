@@ -68,6 +68,10 @@ function scanEngines(projectRoot: string): EngineInfo[] {
     'tradingViewBridge.ts': 'TradingView Bridge — puppeteer-core CDP attach to a user-launched Chrome. setSymbol/setTimeframe/screenshot/evaluate plus a chart-legend reader',
     'tvIndicators.ts': 'TradingView indicator parsers — reads RSI, Ichimoku, Supertrend, Volume from the TV chart legend DOM and overlays values onto local snapshots',
     'tvVision.ts': 'AI Vision chart analysis — Gemini 2.5-flash reads TradingView screenshots for patterns, S/R levels, and directional bias. Single-TF + multi-TF entry points',
+    'killSwitch.ts': 'Kill Switch — file-based panic button. Watches $HOME/.jarvis-halt and ./HALT_TRADING; when either is present, blocks ALL new exposure (entries + campaign deploys). Closes/partial-closes remain unblocked so users can still exit positions while halted. UI toggle in JarvisBrain header. POST /api/halt to halt, POST /api/resume to clear.',
+    'costMeter.ts': 'Cost Telemetry — tracks USD spend per LLM call with purpose tags (scout/analyst/scholar/holistic/strategist/sentinel/sentiment/scanner-signal/etc). In-memory rolling 24h buffer + fire-and-forget Firestore writes to apiUsage. Powers the amber $X.XX pill + breakdown popover in JarvisBrain.',
+    'riskGate.ts': 'Risk Gate — single audit point for every position-opening write. Runs 6 checks (KILL_SWITCH / DAILY_LOSS / NOTIONAL_CAP / CONCURRENT_CAP / LIVE_CAPITAL_CAP / LEVERAGE_CAP) and returns a structured RiskCheckResult with code + reason. tradeExecutor.execute calls this before any side effect.',
+    'curriculum.ts': 'Trading Curriculum — 21 dense, keyword-rich lessons across 10 classes (foundation, ta, risk, entry, exit, psych, regime, crypto, meta). Embedded into vector memory via POST /api/memory/learn-curriculum so Scholar surfaces them on every recall. Examples: "RSI lies in trending markets", "Counter-trend traps in bearish regimes", "Let winners run".',
   };
 
   const ownerScopedEngines = ['sentry.ts', 'agentSwarm.ts', 'positionMonitor.ts', 'portfolioIntel.ts'];
@@ -158,41 +162,61 @@ export function generateAppManifest(projectRoot: string): AppManifest {
   const { count: apiRouteCount, categories: apiCategories } = scanApiRoutes(projectRoot);
   const recentChanges = getRecentGitCommits(projectRoot);
 
-  // Derive human-readable capabilities
+  // Derive human-readable capabilities (refreshed for v1.5.0 — 2026-05-26)
   const capabilities = [
-    // Asset universe
-    'Multi-market trading: 48 curated crypto pairs (Binance) + 33 US stocks + 6 commodity ETFs (Alpaca) — 87 instruments scanned',
-    'Crypto sectors covered: L1, L2, DeFi, AI, Meme, RWA, Gaming, Utility, DEX/Oracle infra',
-    'US equity sectors covered: mega-cap tech, semis/AI hardware, software/cloud, finance/payments, consumer/retail, index ETFs, commodity ETFs (GLD/SLV/USO/UNG/DBA/COPX)',
-    // Broker paths
-    'Live broker routing: Binance + Bybit (crypto via ccxt), Zerodha (Indian equities via Kite), Alpaca (US stocks + commodity ETFs)',
-    'Paper trading with $100K virtual balance — same code path as live, just isPractice=true',
-    'Market-hours guard: stock orders pre-check Alpaca clock and reject cleanly when US session closed',
-    // Pipeline
-    '7-step autonomous decision pipeline: Regime → Scout → Analyst + Scholar → Holistic (Gemini Vision + TV legend) → Strategist → Sentinel → Executor',
-    'TradingView Bridge: puppeteer CDP attach to a user-launched Chrome — Jarvis can read the same chart you are looking at (symbol/timeframe/screenshot/legend values)',
-    'AI Vision chart analysis: Gemini 2.5-flash reads TradingView screenshots for patterns, S/R levels, and directional bias',
-    'Trade Diary: every decision (including vetoes and regime skips) is logged; the Sentinel queries past losses on the symbol to inject lessons learned before the next entry',
-    // Risk math
-    'Kelly Criterion position sizing × Regime multiplier × Deadline-aware Strategy multiplier',
-    'Deadline-Aware Strategy Router: maps remaining time-to-deadline to one of 4 buckets — scalp (<6h, crypto only, 1H, Kelly ×1.3), day (6h-3d, +stocks when US open, 1H/4H), swing (3-14d, +commodities, 4H, Kelly ×0.9), position (>14d, 1D, Kelly ×0.8)',
-    'Market Regime Detection: ADX/ATR/EMA-based trending/ranging/volatile classification with per-regime position-size and SL/TP multipliers',
-    'TA-driven crypto scanner: OBV, VWAP, RSI, MACD, EMA, Bollinger Bands, ATR, ADX across 1H/4H/1D — bearish coins capped at score 45, only BUY signals reach Jarvis Picks',
-    'Risk management: daily loss limits, max position size %, max open positions, correlation guard, circuit breaker',
-    // Learning + memory
-    'Vector Memory Bank with semantic search (Gemini embeddings) — Jarvis remembers trade lessons across sessions',
+    // ─── Asset universe ───
+    'Multi-market: 48 curated crypto pairs (Binance) + 33 US stocks + 6 commodity ETFs (Alpaca) — 87 instruments scanned every cycle',
+    'Live broker routing: Binance + Bybit (ccxt), Zerodha (KiteConnect), Alpaca (US stocks/ETFs). Paper trading uses same code path with isPractice=true.',
+    'Market-hours guard: stock orders pre-check Alpaca clock and reject cleanly when US session is closed',
+
+    // ─── Decision pipeline ───
+    '7-step autonomous pipeline: Regime → Scout → Analyst + Scholar (parallel) → Holistic (full-context + Vision) → Strategist (ATR sizing) → Sentinel (gate) → Executor',
+    'Per-symbol regime override (Phase 7): the symbol Scout picks may be in a different regime than the overall market — Strategist uses the symbol\'s own regime for SL/TP sizing (verified: NEAR sized as VOLATILE/breakout even when overall market is RANGING)',
+    'TradingView Bridge with auto-connect on startup + auto-navigate before vision: when Karthick has Chrome running with --remote-debugging-port=9222, Jarvis attaches to that chart, flips it to whatever symbol he is analyzing, and reads it visually',
+    'Gemini Vision chart analysis: takes screenshots of the live TV chart and extracts bias, patterns, support/resistance levels',
+
+    // ─── Risk + execution rules (live-enforced) ───
+    'Risk Gate with 6 structured codes (Phase 9.3): KILL_SWITCH / DAILY_LOSS / NOTIONAL_CAP / CONCURRENT_CAP / LIVE_CAPITAL_CAP / LEVERAGE_CAP — every veto returns a code + human reason, no silent rejections',
+    'Sentinel enforces 1.5:1 R/R floor + 60% confidence floor on every proposal; Strategist auto-corrects sub-1.5:1 R/R by widening TP before Sentinel sees it (Phase 7 Fix C — defense-in-depth)',
+    'Bleed-hour filter: configurable IST AM/PM window (default 5 PM → 12 AM IST) requires ≥75% confidence — derived from track-record analysis showing those hours bleed money',
+    'Kill switch (Phase 9.1): file-based panic button. `touch HALT_TRADING` or click the red pill in JarvisBrain — all new entries refuse, existing positions still exit normally',
+    'Live-money cap: $50 maxLiveCapital default — total live exposure must stay under this before any new live trade clears Risk Gate',
+    'Campaign R/R parity (Phase 6): autonomous campaigns reject impossibly small profit targets at creation (min = capital × 3.75%, math floor for 1.5:1 R/R at 2.5% SL) AND skip individual deploys with bad R/R during scanAndDeploy',
+
+    // ─── Exit + learn-from-each-trade ───
+    'Let-winners-run exits (Phase 5): dollar profit target fires a 50% partial close (not 100%), then SL → breakeven, trailing → 2% on the remainder. Winners can ride to multi-R targets instead of getting capped at the first $X gain.',
+    'Closed-loop learning (Phase 1 fix): every closed trade (sentry + manual UI close) writes a graded post-mortem A-F into the user\'s vector memory with embeddings. Scholar pulls past lessons by semantic match on every next scan ("Found N past trade lessons for SYMBOL").',
     'PostMortem grader: A-F grades on closed trades with extracted lessons',
-    'Strategy tracker: per-strategy win rates with auto-disable of losers',
+    'Trade Diary UI at /diary: every swarm decision (executed / pending_approval / vetoed_* / no_opportunity / pipeline_error) browsable with filters, indicator snapshot at decision time, regime + risk state, post-mortem outcome when linked',
+    'Strategy Tracker: per-strategy win rates with auto-disable of losing strategies',
     'Confidence Engine: 0-100% live-ready readiness score derived from track record',
-    // Interfaces
-    'Voice-first: Gemini Live tool-calling — Jarvis can be talked to and asked to trade, scan, explain, or check status',
+
+    // ─── Knowledge + memory ───
+    'Vector Memory Bank with semantic search (Gemini embeddings) — 207+ user memories, 97 global knowledge entries',
+    'Trading Curriculum (Phase 4): 21 dense lessons across 10 classes (foundation/ta/risk/entry/exit/psych/regime/crypto/meta) embedded into vector memory — Scholar surfaces them on every relevant recall (e.g., "RSI lies in trending markets", "Counter-trend traps in bearish regimes")',
+    'TradeDiary: structured audit trail — Sentinel queries past failures on the symbol to inject "lessons learned" before the next entry',
+
+    // ─── Math + sizing ───
+    'Kelly Criterion position sizing × Regime multiplier × Deadline-aware Strategy multiplier',
+    'Deadline-Aware Strategy Router: maps remaining time-to-deadline to scalp/day/swing/position buckets — picks markets, timeframe, and Kelly multiplier accordingly',
+    'Market Regime Detection: ADX/ATR/EMA-based trending_up / trending_down / ranging / volatile classification with per-regime SL/TP multipliers',
+    'TA-driven scanner: OBV, VWAP, RSI, MACD, EMA, Bollinger Bands, ATR, ADX across 1H/4H/1D — SCORE now scales by confluence confidence (Phase 5.5), so a coin with 1D:SELL drops in rank even if 1H/4H agree',
+
+    // ─── Cost + observability ───
+    'Cost Telemetry (Phase 9.2): per-LLM-call USD tracking with purpose tags. Pro/Flash routing keeps swarm cost ~$0.008/run. Cost pill in JarvisBrain shows today\'s spend; click for per-purpose breakdown.',
+    'Model split (Phase 9.4): analyst + holistic + strategist run on gemini-2.5-pro; everything else (scout/scholar/sentinel/sentiment) on gemini-2.5-flash — 97% of spend goes to the 3 reasoning-critical agents',
+
+    // ─── Interfaces ───
+    'Voice-first: Gemini Live tool-calling — talk to Jarvis to trade, scan, explain, or check status',
     'Two-way Telegram bot: trade notifications, approval replies, status queries',
-    'Self-awareness: this manifest is auto-regenerated on every startup so Jarvis knows about every engine, route, and capability without manual prompt-engineering',
-    // Infra
+    'JarvisBrain header status pills: 🛑 HALT (kill switch), 💵 $X.XX (cost today), 👁️ TV SYMBOL (vision bridge), AUTO ON/OFF, PRACTICE/LIVE',
+    'Self-awareness: this manifest is auto-regenerated on every server boot — Jarvis sees every engine, route, behavior, and recent commit without manual prompt updates',
+
+    // ─── Infra ───
     `${engines.length} specialized engines running concurrently`,
     `${apiRouteCount} API endpoints available`,
-    'Multi-tenant: each user is isolated by OWNER_USER_ID with per-user encrypted API key storage',
-    'Auto-updating: version checker compares local vs GitHub',
+    'Multi-tenant: each user isolated by OWNER_USER_ID with per-user encrypted API key storage',
+    'Auto-updating: version checker compares local vs GitHub remote',
   ];
 
   return {
@@ -243,6 +267,21 @@ ${routeSummary}
 
 CAPABILITIES:
 ${capabilities}
+
+CURRENT BEHAVIORS (the live rules Jarvis enforces on every trade — refresh these answers when someone asks "why won't you trade?" or "how do you decide?"):
+• R/R minimum: 1.5:1 — Sentinel vetoes anything tighter; Strategist auto-widens TP if AI proposes sub-1.5:1
+• Confidence floor: 60% — Sentinel vetoes below this. The AI Strategist sets confidence honestly based on regime + Holistic + past lessons; we no longer override low confidence with Scout's surface-level TA score.
+• Bleed-hour filter: 12-19 UTC (default = 5 PM → 12 AM IST) requires ≥75% confidence. Configurable in Risk Manager.
+• Per-symbol regime override: Strategist uses the picked coin's OWN regime (e.g., NEAR's VOLATILE/breakout) not the overall market regime (e.g., RANGING when BTC is sideways)
+• Strategist TP rule: 3× ATR × tpMultiplier — the "let it run" target, not the half-mark TP1
+• Strategist SL rule: 1.5× ATR × slMultiplier from entry — regime-adjusted
+• Partial close at profit target: when sentry hits the dollar profit target, 50% closes immediately, SL → entry (breakeven), trailing → 2% on the remainder. Set profitTarget=0 in Risk Manager to disable entirely.
+• Counter-trend trades in bearish regime require ≥75% conviction (curriculum Class 3 rule, taught to Holistic)
+• Campaigns reject targets below capital × 3.75% at creation (math floor for 1.5:1 R/R at 2.5% SL); each individual deploy also rejected if R/R < 1.5
+• Kill switch: HALT_TRADING file at repo root OR ~/.jarvis-halt blocks all new entries. Closes/partial-closes still work.
+• Live trading cap: $50 maxLiveCapital — total live exposure must stay under this. Defaults safe; configurable.
+• Vision auto-navigation: when TV bridge is connected and the swarm picks a symbol different from what's on screen, Jarvis flips the chart automatically before running Gemini Vision (Risk Manager → autoNavigateTV toggle)
+• Closed-loop learning: every closed trade (sentry close, manual UI close, stale auto-close) generates a graded post-mortem and embeds the lesson into vector memory. Scholar pulls past lessons by symbol on every next scan.
 
 RECENT GIT CHANGES:
 ${recentChanges}

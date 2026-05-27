@@ -5,12 +5,30 @@ import { AlpacaConnector, detectAssetClass } from './alpacaConnector.ts';
 import { RiskGate } from './riskGate.ts';
 import { MemoryManager } from './memory.ts';
 import { PostMortemEngine } from './postMortem.ts';
+import {
+  classifyCloseErrorMessage,
+  retryBackoffMs,
+  MAX_CLOSE_ATTEMPTS,
+  MAX_RETRIES_EXHAUSTED_CYCLES,
+  isPermanentlyAbandoned,
+  type CloseErrorClassification,
+} from './closeRetry.ts';
 
 export class TradeExecutor {
   private db: FirebaseFirestore.Firestore;
   private marketState: any;
   private riskGate: RiskGate;
   private memoryManager: MemoryManager | null;
+
+  // Phase 9 (Tier B #3 hardening) — In-process per-tradeId lock for
+  // closeWithRetry. Prevents the manual-vs-mid-retry double-order race:
+  // if Sentry's closeWithRetry is mid-backoff (e.g., sleeping 2s before
+  // attempt 2), and the user simultaneously hits the dashboard force-close
+  // route, both callers should NOT fire separate exchange orders.
+  // Both callers grab the same Promise; whichever fires the actual exchange
+  // call wins, the other returns the same result. Cleaned up on completion.
+  // Cross-process safety is item #11's job (clientOrderId at exchange layer).
+  private closeInFlight: Map<string, Promise<any>> = new Map();
 
   constructor(db: any, marketState: any, riskGate: RiskGate, memoryManager: MemoryManager | null = null) {
     this.db = db;
@@ -449,6 +467,369 @@ export class TradeExecutor {
         pnl: realizedPnl
       }
     };
+  }
+
+  /**
+   * Phase 9 — closeWithRetry: the close path that can't silently give up
+   * and can't pointlessly hammer a position that's already gone.
+   *
+   * Wraps closePosition with:
+   *  - Error classification (transient | already_closed | permanent) via closeRetry.ts
+   *  - Retry-with-backoff (up to MAX_CLOSE_ATTEMPTS) on transient errors only
+   *  - Inline exchange-verify on deterministic "already_closed" classifications,
+   *    so a real-but-misclassified open position is NOT marked closed in DB
+   *  - Persistent closeFailedAt on terminal failure (sentry checks this to skip
+   *    next-tick retry attempts during the retry-hold cooldown)
+   *  - Telegram + brainActivity alerts on every terminal failure
+   *
+   * IDEMPOTENCY GAP (known, item #11 in plan): a successful exchange order
+   * followed by a network blink that loses the response could currently cause
+   * a duplicate order on the retry. Mitigations in v1: (a) inline verify
+   * before each retry, (b) closePosition's "Trade already closed" Firestore
+   * guard catches the duplicate at the DB layer if it succeeded once. Item
+   * #11 (clientOrderId at the exchange layer) closes the remaining window.
+   */
+  async closeWithRetry(userId: string, tradeId: string): Promise<any> {
+    // Phase 9 (Tier B #3 hardening) — in-process per-tradeId lock.
+    // If another call is already running closeWithRetry for this trade
+    // (Sentry mid-backoff + manual force-close arriving, for example),
+    // both callers share the same Promise so only ONE exchange order fires.
+    const existing = this.closeInFlight.get(tradeId);
+    if (existing) {
+      console.log(`[closeWithRetry] ${tradeId} already in-flight — joining existing call`);
+      return existing;
+    }
+
+    const work = this._closeWithRetryUnlocked(userId, tradeId).finally(() => {
+      this.closeInFlight.delete(tradeId);
+    });
+    this.closeInFlight.set(tradeId, work);
+    return work;
+  }
+
+  private async _closeWithRetryUnlocked(userId: string, tradeId: string): Promise<any> {
+    const tradeRef = this.db.collection('trades').doc(tradeId);
+    const initialDoc = await tradeRef.get();
+    if (!initialDoc.exists) throw new Error("Trade not found");
+    const data = initialDoc.data()!;
+    if (data.userId !== userId) throw new Error("Unauthorized");
+
+    // Idempotent: if Firestore says it's already closed, return the existing state
+    if (data.status !== 'open') {
+      return {
+        tradeId,
+        exitPrice: data.exitPrice ?? data.entryPrice,
+        realizedPnl: data.pnl ?? 0,
+        status: 'already_closed_in_db',
+        trade: data,
+      };
+    }
+
+    // Phase 9 (Tier B #3 hardening) — terminal state guard.
+    // Trades that hit MAX_RETRIES_EXHAUSTED_CYCLES enter permanent abandonment.
+    // closeWithRetry refuses to attempt — user must close on the exchange directly.
+    // This prevents the alert-spam-forever loop on the crypto path where
+    // _verifyPositionGone returns null and an already-gone position would
+    // otherwise retry-hold-retry-hold forever.
+    if (isPermanentlyAbandoned(data.closeFailureClass)) {
+      const reason = data.closeFailureReason ?? 'previous retries exhausted';
+      throw new Error(`closeWithRetry: trade abandoned (needs_human) — ${reason}. Manual close on exchange required.`);
+    }
+
+    // Paper mode has no exchange call to retry — delegate directly.
+    // closePosition handles paper-mode entirely in Firestore.
+    if (data.isPractice !== false) {
+      return await this.closePosition(userId, tradeId);
+    }
+
+    // Live mode — retry loop with classification + verify.
+    let lastErr: any = null;
+    let lastClassification: CloseErrorClassification | null = null;
+
+    for (let attempt = 1; attempt <= MAX_CLOSE_ATTEMPTS; attempt++) {
+      const backoff = retryBackoffMs(attempt);
+      if (backoff > 0) {
+        await new Promise(r => setTimeout(r, backoff));
+
+        // Pre-retry verify: did the previous attempt actually succeed despite
+        // throwing? If the exchange now reports no position, treat as success
+        // and reconcile rather than double-order.
+        const preVerify = await this._verifyPositionGone(data, userId);
+        if (preVerify.gone === true) {
+          console.warn(`[closeWithRetry] ${tradeId} verify says position gone before retry #${attempt} — previous attempt actually succeeded; reconciling.`);
+          return await this._reconcileAsClosed(tradeRef, data, userId, tradeId,
+            `Pre-retry verify confirmed position gone: ${preVerify.reason}`);
+        }
+      }
+
+      try {
+        const result = await this.closePosition(userId, tradeId);
+        // Clear any prior failure flags (recovered from earlier failed attempt)
+        await tradeRef.update({
+          closeFailedAt: null,
+          closeFailureReason: null,
+          closeFailureClass: null,
+        }).catch(() => {});
+        return result;
+
+      } catch (err: any) {
+        lastErr = err;
+        const errMsg = String(err?.message ?? '');
+
+        // closePosition's own idempotency guard — concurrent close already updated DB
+        if (errMsg.includes('Trade already closed')) {
+          const freshDoc = await tradeRef.get();
+          const freshData = freshDoc.data() ?? {};
+          return {
+            tradeId,
+            exitPrice: freshData.exitPrice ?? data.entryPrice,
+            realizedPnl: freshData.pnl ?? 0,
+            status: 'already_closed_in_db',
+            trade: freshData,
+          };
+        }
+
+        const classification = classifyCloseErrorMessage(err);
+        lastClassification = classification;
+
+        // Permanent — no retry, escalate immediately
+        if (classification.kind === 'permanent') {
+          await this._markCloseFailed(tradeRef, 'permanent', classification.reason, errMsg);
+          await this._alertCloseFailure(userId, tradeId, data, 'PERMANENT', classification.reason, errMsg);
+          throw new Error(`closeWithRetry permanent failure: ${classification.reason} (orig: ${errMsg})`);
+        }
+
+        // Already-closed signal — do inline exchange-verify before reconciling.
+        // CRITICAL: never mark a live position as closed on the error message
+        // alone. Must have exchange confirmation.
+        if (classification.kind === 'already_closed') {
+          const verify = await this._verifyPositionGone(data, userId);
+          if (verify.gone === true) {
+            // Exchange confirms — safe to reconcile
+            return await this._reconcileAsClosed(tradeRef, data, userId, tradeId,
+              `Verify confirms gone after "${classification.reason}": ${verify.reason}`);
+          }
+          if (verify.gone === false) {
+            // Exchange says position EXISTS. The "insufficient balance" type error
+            // was misleading. Retry as transient.
+            console.warn(`[closeWithRetry] ${tradeId} got "${classification.reason}" but exchange shows position still open — treating as transient`);
+          }
+          // verify.gone === null (couldn't verify) — fall through to retry, conservatively
+        }
+
+        console.warn(`[closeWithRetry] ${tradeId} attempt ${attempt}/${MAX_CLOSE_ATTEMPTS} failed (${classification.kind}: ${classification.reason})`);
+
+        // If this was the last attempt, escalate
+        if (attempt >= MAX_CLOSE_ATTEMPTS) {
+          // Phase 9 (Tier B #3 hardening) — read prior cycle count + increment.
+          // After MAX_RETRIES_EXHAUSTED_CYCLES, transition to terminal needs_human.
+          const priorCount = Number(data.closeRetriesExhaustedCount ?? 0);
+          const newCount = priorCount + 1;
+          const escalateToNeedsHuman = newCount >= MAX_RETRIES_EXHAUSTED_CYCLES;
+
+          if (escalateToNeedsHuman) {
+            await this._markNeedsHuman(tradeRef, lastClassification?.reason ?? 'unknown', errMsg, newCount);
+            await this._alertCloseFailure(userId, tradeId, data, 'NEEDS_HUMAN' as any,
+              `${lastClassification?.reason ?? 'unknown'} (${newCount} cycles)`, errMsg);
+            throw new Error(`closeWithRetry: NEEDS_HUMAN after ${newCount} cycles - ${errMsg}`);
+          }
+
+          await this._markCloseFailed(tradeRef, 'retries_exhausted', lastClassification?.reason ?? 'unknown', errMsg, newCount);
+          await this._alertCloseFailure(userId, tradeId, data, 'RETRIES_EXHAUSTED',
+            `${lastClassification?.reason ?? 'unknown'} (cycle ${newCount}/${MAX_RETRIES_EXHAUSTED_CYCLES})`, errMsg);
+          throw new Error(`closeWithRetry: ${MAX_CLOSE_ATTEMPTS} attempts exhausted (cycle ${newCount}/${MAX_RETRIES_EXHAUSTED_CYCLES}) - ${errMsg}`);
+        }
+        // else: continue loop (backoff at top of next iteration)
+      }
+    }
+
+    // Unreachable — loop either returns or throws on the last attempt
+    throw new Error(`closeWithRetry: unreachable state, lastErr=${lastErr?.message}`);
+  }
+
+  /**
+   * Mark a trade as closed via reconciliation (exchange says position is gone).
+   * Uses last known prices since we don't have a real fill price for the
+   * already-executed close.
+   */
+  private async _reconcileAsClosed(
+    tradeRef: any, data: any, userId: string, tradeId: string, reason: string
+  ): Promise<any> {
+    // Best-effort current price for PnL display (entry price as fallback)
+    const closeAssetClass = this.resolveAssetClass(data.market, data.symbol);
+    let exitPrice = data.entryPrice;
+    try {
+      const fetched = await this.fetchMarketPrice(data.symbol, closeAssetClass, userId, false);
+      if (fetched) exitPrice = fetched;
+    } catch {}
+
+    const isLong = data.side === 'buy';
+    const priceDiff = exitPrice - data.entryPrice;
+    const realizedPnl = isLong ? (priceDiff * data.quantity) : (-priceDiff * data.quantity);
+
+    await tradeRef.update({
+      status: 'closed',
+      exitPrice,
+      exitOrderId: `reconciled-${Date.now()}`,
+      pnl: realizedPnl,
+      closedAt: new Date().toISOString(),
+      closeReconciled: true,
+      closeReconcileReason: reason,
+      closeFailedAt: null,
+      closeFailureReason: null,
+      closeFailureClass: null,
+    });
+
+    // Log to brainActivity
+    this.db.collection('brainActivity').add({
+      userId,
+      agent: 'sentry',
+      type: 'sentry_reconciled',
+      message: `🔄 ${data.symbol} reconciled as closed — ${reason}`,
+      timestamp: new Date().toISOString(),
+      data: { tradeId, symbol: data.symbol, reason },
+    }).catch(() => {});
+
+    // Telegram alert — user should know we reconciled
+    await sendTelegramNotification(this.db, userId,
+      `🔄 <b>Trade Reconciled</b>\n\n` +
+      `${data.side === 'buy' ? 'LONG' : 'SHORT'} ${data.quantity} ${data.symbol}\n` +
+      `Status: marked closed after exchange confirmed no position.\n` +
+      `Reason: ${reason}\n` +
+      `Estimated PnL: $${realizedPnl.toFixed(2)} (using last known price $${exitPrice})`
+    ).catch(() => {});
+
+    return {
+      tradeId,
+      exitPrice,
+      realizedPnl,
+      status: 'reconciled',
+      trade: { ...data, status: 'closed', exitPrice, pnl: realizedPnl },
+    };
+  }
+
+  /**
+   * Check the actual exchange for the position. Returns {gone: true} if the
+   * exchange confirms no position, {gone: false} if a position is still open,
+   * or {gone: null} if we couldn't verify (conservative — caller treats as
+   * transient and retries rather than reconciling).
+   *
+   * v1: Alpaca only. Crypto verify (Binance/Bybit) intentionally returns null
+   * to avoid wrong-reconcile risk on the untested code path. Item #2 of the
+   * Tier B plan (bracket-leg-aware reconciliation) will extend this to crypto.
+   */
+  private async _verifyPositionGone(data: any, userId: string): Promise<{ gone: boolean | null; reason: string }> {
+    const closeAssetClass = this.resolveAssetClass(data.market, data.symbol);
+
+    if (closeAssetClass === 'stock') {
+      try {
+        const alpaca = await this.getAlpacaConnector(userId, false);
+        const position = await alpaca.getPosition(data.symbol);
+        const qty = parseFloat(String(position?.qty ?? '0'));
+        if (qty === 0 || Math.abs(qty) < 1e-8) {
+          return { gone: true, reason: 'Alpaca reports qty=0' };
+        }
+        return { gone: false, reason: `Alpaca reports qty=${qty}` };
+      } catch (err: any) {
+        const msg = String(err?.message ?? '').toLowerCase();
+        if (msg.includes('not found') || msg.includes('404') || msg.includes('does not exist') || msg.includes('no position')) {
+          return { gone: true, reason: 'Alpaca confirms no position (404/not found)' };
+        }
+        return { gone: null, reason: `Alpaca verify itself errored: ${err?.message ?? 'unknown'}` };
+      }
+    }
+
+    // Crypto verify deferred to Tier B item #2. Return unknown so caller
+    // conservatively retries rather than risking a wrong reconcile.
+    return { gone: null, reason: 'crypto verify deferred to Tier B item #2' };
+  }
+
+  /**
+   * Persist close-failure state to the trade doc so sentry's tick loop can
+   * see it and skip retry attempts during the retry-hold cooldown.
+   *
+   * Phase 9 (Tier B #3 hardening): now also persists the cumulative
+   * closeRetriesExhaustedCount, so the cap-at-MAX_RETRIES_EXHAUSTED_CYCLES
+   * transition can fire from this counter on the next failure.
+   */
+  private async _markCloseFailed(
+    tradeRef: any, failureClass: string, reason: string, errMessage: string,
+    retriesExhaustedCount: number = 0
+  ): Promise<void> {
+    await tradeRef.update({
+      closeFailedAt: new Date().toISOString(),
+      closeFailureClass: failureClass,
+      closeFailureReason: reason,
+      closeFailureLastError: errMessage,
+      closeRetriesExhaustedCount: retriesExhaustedCount,
+    }).catch((err: any) => console.error('[closeWithRetry] failed to mark closeFailedAt:', err?.message));
+  }
+
+  /**
+   * Phase 9 (Tier B #3 hardening) — transition a trade to terminal
+   * `needs_human` state after MAX_RETRIES_EXHAUSTED_CYCLES futile cycles.
+   * Sentry permanently skips trades in this state (no more retry attempts,
+   * no more alerts). User must close the position on the exchange directly.
+   */
+  private async _markNeedsHuman(
+    tradeRef: any, reason: string, errMessage: string, cycleCount: number
+  ): Promise<void> {
+    await tradeRef.update({
+      closeFailedAt: new Date().toISOString(),
+      closeFailureClass: 'needs_human',
+      closeFailureReason: `Abandoned after ${cycleCount} retries_exhausted cycles: ${reason}`,
+      closeFailureLastError: errMessage,
+      closeRetriesExhaustedCount: cycleCount,
+      needsHumanAt: new Date().toISOString(),
+    }).catch((err: any) => console.error('[closeWithRetry] failed to mark needs_human:', err?.message));
+  }
+
+  /**
+   * Loud escalation when a close terminally fails. Karthick needs to see this
+   * — a stuck close means the position is still open with no automated
+   * protection. brainActivity surfaces it in JarvisBrain; Telegram nudges him
+   * out-of-band.
+   */
+  private async _alertCloseFailure(
+    userId: string, tradeId: string, data: any,
+    severity: 'PERMANENT' | 'RETRIES_EXHAUSTED' | 'NEEDS_HUMAN',
+    classification: string, errMsg: string
+  ): Promise<void> {
+    const symbol = data.symbol ?? '?';
+    const side = (data.side ?? '?').toUpperCase();
+    const qty = data.quantity ?? '?';
+
+    // brainActivity — shows in JarvisBrain UI
+    this.db.collection('brainActivity').add({
+      userId,
+      agent: 'sentry',
+      type: 'close_failed',
+      message: `🚨 CLOSE FAILED (${severity}) — ${symbol} ${side} ${qty}: ${classification}`,
+      timestamp: new Date().toISOString(),
+      data: { tradeId, symbol, severity, classification, errMessage: errMsg.slice(0, 500) },
+    }).catch(() => {});
+
+    // Telegram — out-of-band, demands attention. The NEEDS_HUMAN case gets
+    // a distinct, louder message because Sentry is no longer going to retry
+    // — the user has to act on the exchange directly.
+    const telegramMsg = severity === 'NEEDS_HUMAN'
+      ? `🛑 <b>CLOSE ABANDONED — NEEDS HUMAN</b>\n\n` +
+        `Trade: ${side} ${qty} ${symbol}\n` +
+        `Classification: ${classification}\n` +
+        `Last error: ${errMsg.slice(0, 200)}\n\n` +
+        `Sentry tried ${classification.match(/\d+/)?.[0] ?? 'multiple'} cycles and gave up. ` +
+        `It will NOT retry this trade again.\n\n` +
+        `<b>Action required: close ${symbol} manually on the exchange.</b> ` +
+        `Then mark the trade closed in the dashboard, or it will stay stuck.`
+      : `🚨 <b>CLOSE FAILED (${severity})</b>\n\n` +
+        `Trade: ${side} ${qty} ${symbol}\n` +
+        `Classification: ${classification}\n` +
+        `Last error: ${errMsg.slice(0, 200)}\n\n` +
+        `Position remains OPEN on the exchange. Manual close may be required.\n` +
+        `Sentry will retry in ~5 minutes; meanwhile no automated protection is active on this trade.`;
+    await sendTelegramNotification(this.db, userId, telegramMsg).catch(() => {});
+
+    console.error(`[closeWithRetry] 🚨 CLOSE FAILED (${severity}) for ${symbol} ${tradeId}: ${classification} — ${errMsg}`);
   }
 
   /**

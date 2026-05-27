@@ -1042,6 +1042,27 @@ async function startServer() {
     res.json(getCostSummary().byPurpose);
   });
 
+  // --- TRADE DIARY READ ROUTE (post-audit follow-up) ---
+  // The diary engine has been logging 200+ entries per user across decisions
+  // (executed, pending, vetoed_*, no_opportunity, pipeline_error), but until
+  // now they were only accessible via the queryTradeDiary voice tool. This
+  // exposes them to the UI for browse/filter/inspect.
+  app.get("/api/diary/:userId", async (req, res) => {
+    try {
+      const userId = req.params.userId;
+      const limit = Math.min(parseInt((req.query.limit as string) || '100', 10) || 100, 500);
+      const symbol = (req.query.symbol as string) || undefined;
+      const entries = await tradeDiary.getEntries(userId, limit, symbol);
+      const optionalDecision = req.query.decision as string | undefined;
+      const filtered = optionalDecision
+        ? entries.filter(e => e.decision === optionalDecision)
+        : entries;
+      res.json({ entries: filtered, total: filtered.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // --- BACKTEST ROUTE (Phase 7 audit fix) ---
   // Engine was already callable from Sentinel via runBacktest(); this exposes
   // it over HTTP so the UI / manual probes can request a backtest.
@@ -1150,6 +1171,10 @@ async function startServer() {
     try {
       const chartOnly = req.query.chartOnly === "1" || req.query.chartOnly === "true";
       const buffer = await tvBridge.screenshot({ chartOnly, type: "png" });
+      if (!buffer) {
+        res.status(409).json({ error: "TV bridge sanity check failed — not on a TradingView chart route" });
+        return;
+      }
       res.set("Content-Type", "image/png");
       res.send(buffer);
     } catch (err: any) {
@@ -1441,6 +1466,27 @@ async function startServer() {
       const limit = Math.min(parseInt((req.query.limit as string) || '150', 10) || 150, 500);
       const activity = await agentSwarm.getRecentActivity(limit);
       res.json({ activity });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Phase 9 (0b) — view latest scan metrics for a user.
+  // Sort in memory to avoid needing a composite Firestore index on
+  // (userId, timestamp). Volume per user is small (one doc per scan).
+  app.get("/api/scan-metrics/recent", async (req, res) => {
+    try {
+      const userId = (req.query.userId as string) || process.env.OWNER_USER_ID;
+      if (!userId) return res.status(400).json({ error: "userId required" });
+      const limit = Math.min(parseInt((req.query.limit as string) || '10', 10) || 10, 50);
+      const snap = await db.collection('scanMetrics')
+        .where('userId', '==', userId)
+        .get();
+      const docs = snap.docs
+        .map(d => ({ id: d.id, ...(d.data() as any) }))
+        .sort((a: any, b: any) => (b.timestamp || '').localeCompare(a.timestamp || ''))
+        .slice(0, limit);
+      res.json({ scanMetrics: docs });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
@@ -2380,8 +2426,11 @@ Be specific. Reference the actual numbers.`;
     }
 
     try {
-      const result = await tradeExecutor.closePosition(userId, tradeId);
-      
+      // Phase 9 (Tier B #3) — closeWithRetry handles transient errors,
+      // verifies "already closed" against the exchange, and alerts on
+      // terminal failure. Manual close gets the same protection as Sentry.
+      const result = await tradeExecutor.closeWithRetry(userId, tradeId);
+
       // FIRE POST-TRADE AUTOMATIONS
       setImmediate(async () => {
         try {

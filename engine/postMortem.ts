@@ -222,6 +222,15 @@ Be specific. Reference the actual numbers.`;
   }
 
   private async storeInMemory(report: PostMortemReport, userId?: string): Promise<void> {
+    // Phase 9 (0a) — Memory writes PAUSED. Grade + display still happen, but
+    // outcome-graded lessons no longer feed Scholar's semantic recall. Reason:
+    // grading by outcome (not process) was teaching outcome-bias into the
+    // closed loop. Full process-based grader (item #8) will replace this.
+    // Pre-pause cohort (~207 entries) still needs quarantine/re-grade — Tier C.
+    console.log(`[POST-MORTEM] ⏸️  Memory write SKIPPED for ${report.symbol} (grade ${report.grade}). Phase 9 (0a) pause active — see plan.`);
+    return;
+
+    // eslint-disable-next-line no-unreachable
     try {
       const memoryText = `[TRADE LESSON] ${report.symbol} ${report.side} — Grade: ${report.grade} — ${report.analysis} Lessons: ${report.lessons.join('. ')}.`;
 

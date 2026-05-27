@@ -205,12 +205,42 @@ export async function analyzeChartImage(
 /**
  * Take a screenshot of the current TradingView chart via bridge,
  * then analyze it with Gemini Vision.
+ *
+ * Phase 9 (#6): if `bridge.screenshot()` returns null (page is not on a TV
+ * chart route, OR the chart symbol doesn't match `opts.symbol`), return a
+ * `skipped: true` sentinel analysis instead of feeding garbage to Vision.
  */
 export async function analyzeChart(
   bridge: TradingViewBridge,
   opts: AnalyzeChartOptions = {}
 ): Promise<VisualChartAnalysis> {
-  const buffer = await bridge.screenshot({ chartOnly: opts.chartOnly ?? true });
+  const buffer = await bridge.screenshot({
+    chartOnly: opts.chartOnly ?? true,
+    expectedSymbol: opts.symbol,
+  });
+  if (!buffer) {
+    // Phase 9 (#6) — distinctive log so observers can tell the skip path
+    // apart from a Vision-ran-and-returned-neutral path. Both produce
+    // bias=neutral / conviction=0 downstream, but they're different bugs
+    // to chase. parseError on the returned object also lets diary readers
+    // distinguish at-a-glance.
+    console.warn(`[Vision] 🚫 SANITY-SKIP — TV bridge sanity check failed for ${opts.symbol ?? 'unknown symbol'} (URL or symbol mismatch). Returning sentinel result; no Gemini call made.`);
+    return {
+      symbol: opts.symbol,
+      timeframe: opts.timeframe,
+      patterns: [],
+      support: [],
+      resistance: [],
+      structure: 'unknown' as MarketStructure,
+      bias: 'neutral',
+      conviction: 0,
+      reasoning: 'Vision SANITY-SKIPPED — TV bridge URL/symbol mismatch. Holistic should ignore the Vision field entirely on this proposal.',
+      parseError: 'sanity_skipped',
+      capturedAt: Date.now(),
+      model: opts.model ?? DEFAULT_VISION_MODEL,
+      latencyMs: 0,
+    };
+  }
   return analyzeChartImage(buffer, opts);
 }
 
