@@ -69,7 +69,10 @@ export function BrokerSettings({
   const testConnection = async (configId: string) => {
     setTestingId(configId);
     try {
-      const res = await fetch(`/api/broker/test/${user.uid}`, { method: 'POST' });
+      // Phase 9 fix — pass configId in URL so the right broker is tested.
+      // Without this, the backend always tested the first config (Binance),
+      // making the Alpaca "Test" button incorrectly report "Connected to Binance".
+      const res = await fetch(`/api/broker/test/${user.uid}/${configId}`, { method: 'POST' });
       const data = await res.json();
       if (data.connected) {
         toast.success(data.message, {

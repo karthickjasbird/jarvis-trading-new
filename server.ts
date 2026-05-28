@@ -808,17 +808,28 @@ async function startServer() {
   // --- BROKER WALLET ROUTES ---
 
   // Test broker connection — verify API keys work
-  app.post("/api/broker/test/:userId", async (req, res) => {
-    const { userId } = req.params;
+  app.post("/api/broker/test/:userId/:configId?", async (req, res) => {
+    const { userId, configId } = req.params;
     try {
-      const brokerSnap = await db.collection('users').doc(userId)
-        .collection('brokerConfigs').where('isActive', '==', true).get();
-      
-      if (brokerSnap.empty) {
-        return res.json({ connected: false, error: "No active broker configured. Go to Settings → Broker to add your exchange API keys." });
+      // Phase 9 (Tier B) — pick specific config when configId is provided.
+      // Old call without configId still works (picks first active config) for
+      // back-compat, but the UI now passes configId so each broker's Test
+      // button tests THAT broker, not whichever happens to be first.
+      let config: any = null;
+      if (configId) {
+        const docRef = await db.collection('users').doc(userId).collection('brokerConfigs').doc(configId).get();
+        if (!docRef.exists) {
+          return res.json({ connected: false, error: `Broker config not found: ${configId}` });
+        }
+        config = docRef.data();
+      } else {
+        const brokerSnap = await db.collection('users').doc(userId)
+          .collection('brokerConfigs').where('isActive', '==', true).get();
+        if (brokerSnap.empty) {
+          return res.json({ connected: false, error: "No active broker configured. Go to Settings → Broker to add your exchange API keys." });
+        }
+        config = brokerSnap.docs[0].data();
       }
-
-      const config = brokerSnap.docs[0].data();
 
       if (['binance', 'bybit'].includes(config.brokerName)) {
         const exchangeClass = (ccxt as any)[config.brokerName];
@@ -837,6 +848,25 @@ async function startServer() {
           totalBalance: usdtBalance,
           currency: 'USDT',
           message: `Successfully connected to ${config.brokerName.charAt(0).toUpperCase() + config.brokerName.slice(1)}!`
+        });
+      } else if (config.brokerName === 'alpaca') {
+        // Phase 9 (Tier B #1) — Alpaca paper test. Uses paper:true by default
+        // since the broker config UI is paper-keys-first; if a user adds live
+        // keys we'd add a config.paper flag. Today: PK... keys are paper.
+        const { AlpacaConnector } = await import('./engine/alpacaConnector.ts');
+        const alpaca = new AlpacaConnector({
+          apiKeyId: config.apiKey,
+          secretKey: config.apiSecret,
+          paper: config.paper !== false,  // default paper:true
+        });
+        const account = await alpaca.getAccount();
+        const balance = parseFloat(String(account?.cash ?? account?.buying_power ?? 0));
+        return res.json({
+          connected: true,
+          exchange: 'alpaca',
+          totalBalance: balance,
+          currency: 'USD (Paper)',
+          message: `Successfully connected to Alpaca${config.paper !== false ? ' (Paper)' : ' (Live)'}!`
         });
       } else if (config.brokerName === 'zerodha') {
         if (!config.accessToken) {
@@ -2433,6 +2463,95 @@ Be specific. Reference the actual numbers.`;
       }
       console.error("Trade execution failed:", error);
       res.status(500).json({ error: error.message || "Trade execution failed" });
+    }
+  });
+
+  // Phase 9 (Tier B #1+#2) — DEBUG endpoint for end-to-end bracket verification
+  // against Alpaca's paper trading environment. Lets Karthick verify the
+  // bracket placement code lands a real entry + SL leg on Alpaca paper without
+  // touching real money. Paper-keys-only — the connector hardcodes paper:true.
+  //
+  // POST body: { userId?, symbol, qty, stopLossPrice }
+  // Returns: BracketResult JSON (entryOrderId, stopLossOrderId, status, ...)
+  //
+  // After hitting this, check https://app.alpaca.markets/paper/dashboard/orders
+  // to confirm BOTH the entry market order AND the OTO SL leg appear.
+  app.post("/api/test/place-bracket-via-alpaca-paper", async (req, res) => {
+    try {
+      const { userId, symbol, qty, stopLossPrice } = req.body ?? {};
+      const targetUserId = userId || process.env.OWNER_USER_ID;
+      if (!targetUserId) return res.status(400).json({ error: "userId required (or OWNER_USER_ID env)" });
+      if (!symbol || !qty || !stopLossPrice) {
+        return res.status(400).json({ error: "symbol, qty, stopLossPrice required" });
+      }
+
+      // Resolve Alpaca creds via the same 3-source fallback chain
+      // tradeExecutor.getAlpacaConnector uses.
+      let apiKeyId = '';
+      let secretKey = '';
+      try {
+        const sec = await db.collection('users').doc(targetUserId).collection('secrets').doc('apiKeys').get();
+        if (sec.exists) {
+          const data: any = sec.data() || {};
+          apiKeyId = data.alpacaApiKeyId || '';
+          secretKey = data.alpacaSecretKey || '';
+        }
+      } catch {}
+      if (!apiKeyId || !secretKey) {
+        try {
+          const bcSnap = await db.collection('users').doc(targetUserId).collection('brokerConfigs')
+            .where('brokerName', '==', 'alpaca').limit(1).get();
+          if (!bcSnap.empty) {
+            const data: any = bcSnap.docs[0].data() || {};
+            apiKeyId = apiKeyId || data.apiKey || '';
+            secretKey = secretKey || data.apiSecret || '';
+          }
+        } catch {}
+      }
+      apiKeyId = apiKeyId || process.env.ALPACA_API_KEY_ID || '';
+      secretKey = secretKey || process.env.ALPACA_SECRET_KEY || '';
+      if (!apiKeyId || !secretKey) {
+        return res.status(400).json({
+          error: "Alpaca paper keys not configured",
+          hint: "Add them via Broker Settings UI, OR set in .env: ALPACA_API_KEY_ID=PK... and ALPACA_SECRET_KEY=...",
+          searchedSources: [
+            `users/${targetUserId.slice(0,8)}.../secrets/apiKeys (alpacaApiKeyId/alpacaSecretKey)`,
+            `users/${targetUserId.slice(0,8)}.../brokerConfigs where brokerName='alpaca'`,
+            "process.env.ALPACA_API_KEY_ID / ALPACA_SECRET_KEY",
+          ],
+        });
+      }
+
+      // Build paper connector — flips the paper:true flag
+      const { AlpacaConnector } = await import('./engine/alpacaConnector.ts');
+      const alpaca = new AlpacaConnector({
+        apiKeyId,
+        secretKey,
+        paper: true,  // <— THE KEY DIFFERENCE — hits paper-api.alpaca.markets
+      });
+
+      // Call the bracket orchestrator
+      const { placeEntryWithStopLoss } = await import('./engine/brackets.ts');
+      const clientOrderIdPrefix = `jvb-debug-${Date.now()}`;
+      const result = await placeEntryWithStopLoss({
+        venue: 'alpaca',
+        exchange: alpaca,
+        symbol,
+        side: 'buy',  // long-only for the debug path
+        quantity: Number(qty),
+        stopLossPrice: Number(stopLossPrice),
+        clientOrderIdPrefix,
+      });
+
+      res.json({
+        status: 'submitted',
+        verifyUrl: 'https://app.alpaca.markets/paper/dashboard/orders',
+        clientOrderIdPrefix,
+        bracketResult: result,
+        notes: 'Check Alpaca paper Orders page. You should see TWO rows: the entry market order AND a child stop order with the same client_order_id prefix.',
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message ?? String(err) });
     }
   });
 

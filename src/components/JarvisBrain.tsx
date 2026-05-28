@@ -1452,7 +1452,9 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
         {goals.length > 0 ? (
           <div className="space-y-3">
             {goals.slice(0, 3).map((goal: any) => {
-              const progress = Math.max(0, Math.min(100, (goal.currentProgress / goal.targetProfit) * 100));
+              // Phase 9 fix — guard against NaN% when currentProgress is
+              // undefined (fresh campaign) or targetProfit is 0/missing.
+              const progress = Math.max(0, Math.min(100, ((goal.currentProgress ?? 0) / (goal.targetProfit || 1)) * 100));
               const isComplete = goal.status === 'completed';
               return (
                 <motion.div

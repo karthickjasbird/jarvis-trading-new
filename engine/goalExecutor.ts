@@ -143,8 +143,12 @@ export class GoalExecutor {
       );
     }
 
-    const deadline = new Date();
-    deadline.setDate(deadline.getDate() + deadlineDays);
+    // Phase 9 fix — millisecond arithmetic, NOT setDate(). setDate() truncates
+    // to an integer day-of-month, so any sub-day deadline (deadlineDays < 1,
+    // e.g. 0.25 = 6 hours) got rounded to 0 days added → deadline = now →
+    // campaign expired the instant the expiry check ran. Scalp campaigns
+    // (hours-long deadlines) were impossible before this fix.
+    const deadline = new Date(Date.now() + deadlineDays * 24 * 60 * 60 * 1000);
 
     // Calculate initial risk based on target aggressiveness
     const returnPct = (targetProfit / capital) * 100;
