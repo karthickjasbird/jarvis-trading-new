@@ -1225,7 +1225,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
 
       {/* ─── Jarvis Confidence Widget ─── */}
       {isPracticeMode && (
-        <div style={{ position: 'relative', zIndex: 2, marginBottom: 20 }}>
+        <div id="brain-confidence" style={{ position: 'relative', zIndex: 2, marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-emerald-400" />
@@ -1391,7 +1391,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
       )}
 
       {/* Goal Tracker Widget */}
-      <div className="brain-goal-section" style={{ position: 'relative', zIndex: 2, marginBottom: 24 }}>
+      <div id="brain-goals" className="brain-goal-section" style={{ position: 'relative', zIndex: 2, marginBottom: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <div className="flex items-center gap-2">
             <Crosshair className="w-4 h-4 text-amber-400" />
@@ -1670,7 +1670,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
         };
 
         return (
-          <div style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
+          <div id="brain-campaigns" style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <Zap className="w-4 h-4 text-cyan-400" />
@@ -1711,7 +1711,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
       })()}
 
       {/* Market Intelligence Widget */}
-      <div style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
+      <div id="brain-intel" style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
         <div className="flex items-center gap-2 mb-3">
           <span className="text-sm font-semibold text-zinc-300 tracking-wide">📡 MARKET INTELLIGENCE</span>
         </div>
@@ -1719,7 +1719,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
       </div>
 
       {/* Market Regime Widget */}
-      <div style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
+      <div id="brain-regime" style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
         <div className="flex items-center gap-2 mb-3">
           <Gauge className="w-4 h-4 text-purple-400" />
           <span className="text-sm font-semibold text-zinc-300 tracking-wide">MARKET REGIME</span>
@@ -1728,7 +1728,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
       </div>
 
       {/* Kelly Position Sizing Widget */}
-      <div style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
+      <div id="brain-kelly" style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
         <div className="flex items-center gap-2 mb-3">
           <PieChart className="w-4 h-4 text-cyan-400" />
           <span className="text-sm font-semibold text-zinc-300 tracking-wide">KELLY POSITION SIZING</span>
@@ -1737,7 +1737,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
       </div>
 
       {/* Sentiment & News Widget */}
-      <div style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
+      <div id="brain-sentiment" style={{ position: 'relative', zIndex: 2, marginBottom: 16 }}>
         <div className="flex items-center gap-2 mb-3">
           <Newspaper className="w-4 h-4 text-amber-400" />
           <span className="text-sm font-semibold text-zinc-300 tracking-wide">MARKET SENTIMENT</span>
@@ -1746,7 +1746,7 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
       </div>
 
       {/* Market Scanner Widget */}
-      <div style={{ position: 'relative', zIndex: 2, marginBottom: 24 }}>
+      <div id="brain-scanner" style={{ position: 'relative', zIndex: 2, marginBottom: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <div className="flex items-center gap-2">
             <Radio className="w-4 h-4 text-cyan-400" />

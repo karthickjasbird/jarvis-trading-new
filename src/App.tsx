@@ -32,6 +32,17 @@ import { MaintenanceBanner } from './components/MaintenanceBanner';
 import { UpdateBanner } from './components/UpdateBanner';
 import { OnboardingWizard } from './components/OnboardingWizard';
 
+// Maps an app symbol to a TradingView widget symbol. Crypto → BINANCE: prefix;
+// stocks/commodities → bare ticker (the TV widget resolves AAPL/TSLA/GLD itself).
+function toTradingViewSymbol(symbol: string, assetClass?: string): string {
+  const isCrypto = assetClass === 'crypto' || symbol.includes('/') || /USDT?$/i.test(symbol);
+  return isCrypto ? `BINANCE:${symbol.replace('/', '').toUpperCase()}` : symbol.toUpperCase();
+}
+
+function isCryptoTvSymbol(tv: string): boolean {
+  return tv.startsWith('BINANCE:');
+}
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [showBrokerSettings, setShowBrokerSettings] = useState(false);
@@ -98,6 +109,10 @@ export default function App() {
   const [isPracticeMode, setIsPracticeMode] = useState(true); // Default to PRACTICE for safety
   const [selectedChartSymbol, setSelectedChartSymbol] = useState('BINANCE:BTCUSDT');
   const [liveVisionEnabled, setLiveVisionEnabled] = useState(false);
+  // Sub-tab state lifted here so voice navigation (navigateApp view) can switch them.
+  const [marketAssetClass, setMarketAssetClass] = useState<'crypto' | 'stocks' | 'commodities'>('crypto');
+  const [dashboardTab, setDashboardTab] = useState<'positions' | 'pending' | 'history' | 'sentry' | 'intel'>('positions');
+  const [settingsTab, setSettingsTab] = useState<'brokers' | 'notifications' | 'preferences' | 'apikeys'>('brokers');
   const [showRealModeConfirm, setShowRealModeConfirm] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
@@ -159,31 +174,58 @@ export default function App() {
   const { positions, pendingTrades, tradeHistory, dailyPnl, portfolio, sentryConfig, sentryLogs, closePosition, panicCloseAll, executeTrade, approveTrade, declineTrade, isLoading } = useTrades(user?.uid || '', isPracticeMode);
   const { news, whaleAlerts } = useMarketIntel();
 
-  const handleNavigate = useCallback((destination: string) => {
+  const handleNavigate = useCallback((destination: string, symbol?: string, view?: string) => {
     if (['home', 'market', 'history', 'settings', 'chart', 'analytics', 'risk', 'brain', 'memories', 'diary'].includes(destination)) {
+      if (destination === 'chart' && symbol) {
+        setSelectedChartSymbol(toTradingViewSymbol(symbol));
+      }
       setAppState(destination as any);
       if (destination === 'settings') {
         setShowBrokerSettings(true);
       } else {
         setShowBrokerSettings(false);
       }
+      // Route an optional sub-tab request to the right surface. Accepts the
+      // model's natural words (synonyms mapped) so "open alerts"/"trade history" land.
+      if (view) {
+        const v = view.toLowerCase();
+        if (['crypto', 'stocks', 'commodities'].includes(v)) {
+          setMarketAssetClass(v as any);
+        } else if (['brokers', 'apikeys', 'api keys', 'notifications', 'alerts', 'preferences', 'style'].includes(v)) {
+          setSettingsTab((v === 'api keys' ? 'apikeys' : v === 'alerts' ? 'notifications' : v === 'style' ? 'preferences' : v) as any);
+        } else if (['positions', 'pending', 'approvals', 'sentry', 'intel', 'history', 'trades'].includes(v)) {
+          setDashboardTab((v === 'approvals' ? 'pending' : v === 'trades' ? 'history' : v) as any);
+        }
+      }
     }
   }, []);
 
   const getAppState = useCallback(() => {
+    const pageLabels: Record<string, string> = {
+      home: 'Home (Dashboard)', market: 'Market Watchlist', chart: 'Chart',
+      history: 'Trade History', settings: 'Settings', analytics: 'Analytics',
+      risk: 'Risk Manager', brain: 'Jarvis Brain', memories: 'Core Memories', diary: 'Decision Diary',
+    };
+    const subTab = appState === 'market' ? marketAssetClass
+      : appState === 'settings' ? settingsTab
+      : appState === 'home' ? `dashboard dock: ${dashboardTab}`
+      : appState === 'chart' ? selectedChartSymbol
+      : null;
     return JSON.stringify({
-      appState,
+      page: pageLabels[appState] || appState,
+      activeSubTab: subTab,
       portfolio,
       openPositions: positions,
       sentryStatus: sentryConfig?.active ? 'Active' : 'Inactive',
       recentTrades: tradeHistory.slice(0, 5),
       marketIntel: { news: news.slice(0, 3), whaleAlerts: whaleAlerts.slice(0, 3) }
     });
-  }, [appState, portfolio, positions, sentryConfig, tradeHistory, news, whaleAlerts]);
+  }, [appState, marketAssetClass, settingsTab, dashboardTab, selectedChartSymbol, portfolio, positions, sentryConfig, tradeHistory, news, whaleAlerts]);
 
   const handleHighlight = useCallback((elementId: string) => {
     const el = document.getElementById(elementId);
     if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       el.classList.add('ghost-highlight');
       setTimeout(() => {
         el.classList.remove('ghost-highlight');
@@ -259,17 +301,38 @@ export default function App() {
     }
   }, [transcript]);
 
+  // Builds context + snapshots and opens a Jarvis live session with the CURRENT
+  // screen-vision setting. Reused by wake and by the mid-session reconnect effect.
+  const connectJarvis = useCallback(async () => {
+    const context = await memoryService.getFormattedContext(user?.uid, "user rules, preferences and recent trading behavior", { news, whaleAlerts });
+    const portfolioSnapshot = getPortfolioSnapshot();
+    const brokerStatus = getBrokerStatus();
+    startSession(context, screenShareEnabled, searchEnabled, personality, undefined, true, liveModel, isPracticeMode, tradingMode, portfolioSnapshot, brokerStatus);
+    toggleMic(true);
+  }, [screenShareEnabled, searchEnabled, personality, startSession, news, whaleAlerts, toggleMic, user, liveModel, isPracticeMode, tradingMode, getPortfolioSnapshot, getBrokerStatus]);
+
   const handleWake = useCallback(async () => {
     if (!isConnected && !isConnecting) {
-      const context = await memoryService.getFormattedContext(user?.uid, "user rules, preferences and recent trading behavior", { news, whaleAlerts });
-      const portfolioSnapshot = getPortfolioSnapshot();
-      const brokerStatus = getBrokerStatus();
-      startSession(context, screenShareEnabled, searchEnabled, personality, undefined, true, liveModel, isPracticeMode, tradingMode, portfolioSnapshot, brokerStatus);
-      toggleMic(true);
+      await connectJarvis();
     } else if (isConnected) {
       toggleMic();
     }
-  }, [isConnected, isConnecting, screenShareEnabled, searchEnabled, personality, startSession, news, whaleAlerts, toggleMic, user, liveModel, isPracticeMode, tradingMode, getPortfolioSnapshot, getBrokerStatus]);
+  }, [isConnected, isConnecting, connectJarvis, toggleMic]);
+
+  // Screen Vision only takes effect at session start. If the user flips it while
+  // Jarvis is connected, reconnect so the change applies immediately (stopSession
+  // preserves the transcript/sessionId, so the conversation continues).
+  const prevScreenShareRef = useRef(screenShareEnabled);
+  useEffect(() => {
+    if (prevScreenShareRef.current !== screenShareEnabled) {
+      prevScreenShareRef.current = screenShareEnabled;
+      if (isConnected) {
+        toast(screenShareEnabled ? 'Reconnecting to enable screen vision…' : 'Reconnecting to disable screen vision…');
+        stopSession();
+        connectJarvis();
+      }
+    }
+  }, [screenShareEnabled, isConnected, stopSession, connectJarvis]);
 
   // Save memory when session is fully ended (endSession clears transcript)
   const prevTranscriptRef = useRef('');
@@ -663,13 +726,15 @@ export default function App() {
 
       <AnimatePresence>
         {showBrokerSettings && (
-          <BrokerSettings 
-            user={user} 
-            onClose={() => setShowBrokerSettings(false)} 
+          <BrokerSettings
+            user={user}
+            onClose={() => setShowBrokerSettings(false)}
             personality={personality}
             setPersonality={setPersonality}
             orbVariant={orbVariant}
             setOrbVariant={setOrbVariant}
+            activeTab={settingsTab}
+            setActiveTab={setSettingsTab}
           />
         )}
       </AnimatePresence>
@@ -684,12 +749,14 @@ export default function App() {
             exit={{ opacity: 0, scale: 0.95 }}
             className="absolute inset-0 z-10 pt-20 pb-32 overflow-hidden"
           >
-            <MarketWatchlist onSelectCoin={(symbol) => {
-              // Convert symbol format: "BTC/USDT" → "BINANCE:BTCUSDT"
-              const tvSymbol = `BINANCE:${symbol.replace('/', '')}`;
-              setSelectedChartSymbol(tvSymbol);
-              setAppState('chart');
-            }} />
+            <MarketWatchlist
+              assetClass={marketAssetClass}
+              setAssetClass={setMarketAssetClass}
+              onSelectCoin={(symbol, assetClass) => {
+                setSelectedChartSymbol(toTradingViewSymbol(symbol, assetClass));
+                setAppState('chart');
+              }}
+            />
           </motion.div>
         )}
 
@@ -722,6 +789,8 @@ export default function App() {
                       value={selectedChartSymbol}
                       onChange={(e) => {
                         setSelectedChartSymbol(e.target.value);
+                        // The Jarvis Analysis side-panel is crypto-only TA — skip it for stocks.
+                        if (!isCryptoTvSymbol(e.target.value)) return;
                         const sym = e.target.value.replace('BINANCE:', '');
                         if (jarvisAnalysisSymbolRef.current !== sym) {
                           jarvisAnalysisSymbolRef.current = sym;
@@ -755,24 +824,33 @@ export default function App() {
                         { value: 'BINANCE:INJUSDT', label: 'INJ / USDT' },
                         { value: 'BINANCE:TIAUSDT', label: 'TIA / USDT' },
                         { value: 'BINANCE:SEIUSDT', label: 'SEI / USDT' },
+                        { value: 'AAPL', label: 'AAPL (stock)' },
+                        { value: 'TSLA', label: 'TSLA (stock)' },
+                        { value: 'NVDA', label: 'NVDA (stock)' },
+                        { value: 'MSFT', label: 'MSFT (stock)' },
+                        { value: 'AMZN', label: 'AMZN (stock)' },
+                        { value: 'GOOGL', label: 'GOOGL (stock)' },
                       ].map(opt => (
                         <option key={opt.value} value={opt.value}>{opt.label}</option>
                       ))}
                     </select>
                     
-                    {/* Live Vision Toggle */}
-                    <button
-                      onClick={() => setLiveVisionEnabled(!liveVisionEnabled)}
-                      className={`ml-4 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold tracking-wide transition-all border ${
-                        liveVisionEnabled
-                          ? 'bg-violet-500/20 text-violet-300 border-violet-500/40 shadow-[0_0_10px_rgba(139,92,246,0.2)]'
-                          : 'bg-zinc-800/60 text-zinc-500 border-zinc-700/50 hover:border-zinc-600 hover:text-zinc-300'
-                      }`}
-                    >
-                      <Brain className={`w-3.5 h-3.5 ${liveVisionEnabled ? 'animate-pulse text-violet-400' : ''}`} />
-                      {liveVisionEnabled ? 'LIVE AI VISION : ON' : 'STANDARD VIEW'}
-                    </button>
-                    
+                    {/* Chart renderer toggle — Jarvis's custom chart vs standard TradingView.
+                        Crypto-only (LiveJarvisChart pulls Binance data); hidden for stocks. */}
+                    {isCryptoTvSymbol(selectedChartSymbol) && (
+                      <button
+                        onClick={() => setLiveVisionEnabled(!liveVisionEnabled)}
+                        className={`ml-4 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold tracking-wide transition-all border ${
+                          liveVisionEnabled
+                            ? 'bg-violet-500/20 text-violet-300 border-violet-500/40 shadow-[0_0_10px_rgba(139,92,246,0.2)]'
+                            : 'bg-zinc-800/60 text-zinc-500 border-zinc-700/50 hover:border-zinc-600 hover:text-zinc-300'
+                        }`}
+                      >
+                        <Brain className={`w-3.5 h-3.5 ${liveVisionEnabled ? 'animate-pulse text-violet-400' : ''}`} />
+                        {liveVisionEnabled ? 'JARVIS CHART' : 'STANDARD CHART'}
+                      </button>
+                    )}
+
                     {!liveVisionEnabled && <span className="text-xs text-zinc-500 ml-2">Select a coin or click one in Market tab</span>}
                   </>
                 )}
@@ -788,8 +866,8 @@ export default function App() {
                     capital={replayConfig?.capital}
                     profitTarget={replayConfig?.profitTarget}
                   />
-                ) : liveVisionEnabled ? (
-                  <LiveJarvisChart 
+                ) : (liveVisionEnabled && isCryptoTvSymbol(selectedChartSymbol)) ? (
+                  <LiveJarvisChart
                     symbol={selectedChartSymbol}
                     positions={positions}
                     tradeHistory={tradeHistory}
@@ -1560,7 +1638,9 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <Dashboard 
+      <Dashboard
+        activeTab={dashboardTab}
+        setActiveTab={setDashboardTab}
         positions={positions}
         pendingTrades={pendingTrades}
         tradeHistory={tradeHistory}

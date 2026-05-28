@@ -32,27 +32,30 @@ const BROKERS = [
 
 type OrbVariant = 'hologram' | 'liquid' | 'ethereal';
 
-export function BrokerSettings({ 
-  user, 
+export function BrokerSettings({
+  user,
   onClose,
   personality,
   setPersonality,
   orbVariant,
-  setOrbVariant
-}: { 
-  user: User, 
+  setOrbVariant,
+  activeTab,
+  setActiveTab
+}: {
+  user: User,
   onClose: () => void,
   personality?: 'classic' | 'sarcastic' | 'scientific',
   setPersonality?: (p: 'classic' | 'sarcastic' | 'scientific') => void,
   orbVariant?: OrbVariant,
-  setOrbVariant?: (v: OrbVariant) => void
+  setOrbVariant?: (v: OrbVariant) => void,
+  activeTab: 'brokers' | 'notifications' | 'preferences' | 'apikeys',
+  setActiveTab: (t: 'brokers' | 'notifications' | 'preferences' | 'apikeys') => void
 }) {
   const [configs, setConfigs] = useState<BrokerConfig[]>([]);
   const [notificationConfig, setNotificationConfig] = useState<NotificationConfig>({ telegramChatId: '', enabled: false });
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newConfig, setNewConfig] = useState({ brokerName: 'zerodha', apiKey: '', apiSecret: '' });
-  const [activeTab, setActiveTab] = useState<'brokers' | 'notifications' | 'preferences' | 'apikeys'>('brokers');
   const [testingId, setTestingId] = useState<string | null>(null);
   
   // Per-user API Keys

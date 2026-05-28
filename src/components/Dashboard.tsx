@@ -24,6 +24,8 @@ import { toast } from 'sonner';
 import { TimeMachineControls } from './TimeMachineControls';
 
 interface DashboardProps {
+  activeTab: 'positions' | 'pending' | 'history' | 'sentry' | 'intel';
+  setActiveTab: (t: 'positions' | 'pending' | 'history' | 'sentry' | 'intel') => void;
   positions: Position[];
   pendingTrades?: any[];
   tradeHistory: ClosedTrade[];
@@ -45,6 +47,8 @@ interface DashboardProps {
 }
 
 export function Dashboard({
+  activeTab,
+  setActiveTab,
   positions,
   pendingTrades = [],
   tradeHistory,
@@ -65,7 +69,6 @@ export function Dashboard({
   onStopReplay,
 }: DashboardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [activeTab, setActiveTab] = useState<'positions' | 'pending' | 'history' | 'sentry' | 'intel'>('positions');
   const [closingId, setClosingId] = useState<string | null>(null);
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [decliningId, setDecliningId] = useState<string | null>(null);

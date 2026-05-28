@@ -407,7 +407,7 @@ export function RiskManager({ userId }: { userId: string }) {
       </div>
 
       {/* ─── SETTINGS (Collapsible) ─── */}
-      <div>
+      <div id="risk-settings">
         <button
           onClick={() => setShowSettings(!showSettings)}
           className="flex items-center gap-2 text-xs font-semibold text-zinc-500 hover:text-zinc-300 transition-colors mb-2"

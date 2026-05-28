@@ -99,7 +99,11 @@ function VerdictIcon({ type }: { type: 'up' | 'down' | 'dash' }) {
   return <Minus className="w-3.5 h-3.5" />;
 }
 
-export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: string) => void }) {
+export function MarketWatchlist({ onSelectCoin, assetClass, setAssetClass }: {
+  onSelectCoin: (symbol: string, assetClass: string) => void;
+  assetClass: AssetClass;
+  setAssetClass: (c: AssetClass) => void;
+}) {
   const [coins, setCoins] = useState<CoinData[]>([]);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -107,7 +111,6 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
   const [sortBy, setSortBy] = useState<SortKey>('score');
   const [sortAsc, setSortAsc] = useState(false);
   const [lastScanTime, setLastScanTime] = useState<string>('');
-  const [assetClass, setAssetClass] = useState<AssetClass>('crypto');
   const [marketOpen, setMarketOpen] = useState<boolean | null>(null);
 
   // Equity-side data fetcher. POSTs to scan-stocks; for the Commodities tab
@@ -344,7 +347,7 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
               return (
                 <button
                   key={`hot-${coin.symbol}`}
-                  onClick={() => onSelectCoin(coin.symbol)}
+                  onClick={() => onSelectCoin(coin.symbol, assetClass)}
                   className="bg-gradient-to-br from-emerald-500/10 to-zinc-900/80 border border-emerald-500/20 rounded-xl p-4 text-left hover:border-emerald-500/40 hover:from-emerald-500/15 transition-all duration-200 group"
                 >
                   <div className="flex justify-between items-start mb-2">
@@ -443,7 +446,7 @@ export function MarketWatchlist({ onSelectCoin }: { onSelectCoin: (symbol: strin
             return (
               <button
                 key={coin.symbol}
-                onClick={() => onSelectCoin(coin.symbol)}
+                onClick={() => onSelectCoin(coin.symbol, assetClass)}
                 className={`grid grid-cols-12 gap-2 px-4 py-3 w-full text-left hover:bg-zinc-800/50 transition-all duration-150 group
                   ${verdict.rowTint}
                   ${i !== sorted.length - 1 ? 'border-b border-zinc-800/50' : ''}`}

@@ -151,14 +151,22 @@ const deepStudyWebsiteTool: FunctionDeclaration = {
 
 const navigateAppTool: FunctionDeclaration = {
   name: 'navigateApp',
-  description: 'Navigate the user to a different section or tab of the application.',
+  description: 'Navigate the user to ANY page or sub-tab of the app. ALWAYS use this to take the user somewhere — never tell them to click a tab themselves. Pages: home (dashboard), market (watchlist/scanner), chart (price charts), history (trade history), settings (broker/API/alerts/style), analytics (performance), risk (risk manager), brain (Jarvis Brain — agents, scanner, goals, campaigns, kelly, regime), memories (core memories), diary (decision diary). For a specific chart pass symbol. For a sub-tab pass view.',
   parameters: {
     type: Type.OBJECT,
     properties: {
-      destination: { 
-        type: Type.STRING, 
-        description: 'The destination tab to navigate to.',
-        enum: ['home', 'market', 'chart', 'history', 'settings']
+      destination: {
+        type: Type.STRING,
+        description: 'The page to navigate to.',
+        enum: ['home', 'market', 'chart', 'history', 'settings', 'analytics', 'risk', 'brain', 'memories', 'diary']
+      },
+      symbol: {
+        type: Type.STRING,
+        description: 'Optional. Only for destination "chart" — the asset to display, e.g. "AAPL", "TSLA" for stocks or "BTC/USDT", "ETH/USDT" for crypto.'
+      },
+      view: {
+        type: Type.STRING,
+        description: 'Optional sub-tab within the destination. market: "crypto"|"stocks"|"commodities". settings: "brokers"|"apikeys"|"alerts"|"style". home (dashboard dock): "positions"|"pending"|"sentry"|"intel"|"trades".'
       }
     },
     required: ['destination']
@@ -183,9 +191,9 @@ const highlightElementTool: FunctionDeclaration = {
   parameters: {
     type: Type.OBJECT,
     properties: {
-      elementId: { 
-        type: Type.STRING, 
-        description: 'The ID of the element to highlight (e.g., "panic-button", "settings-button", "memories-button", "mic-button", "screen-share-button", "tab-home", "tab-market", "tab-history", "tab-settings")' 
+      elementId: {
+        type: Type.STRING,
+        description: 'The ID of the element to highlight/scroll to. UI controls: "panic-button", "settings-button", "memories-button", "mic-button", "screen-share-button", "tab-home", "tab-market", "tab-history", "tab-settings". Brain page sections (navigate to brain first): "brain-confidence", "brain-goals", "brain-campaigns", "brain-intel", "brain-regime", "brain-kelly", "brain-sentiment", "brain-scanner". Risk page: "risk-settings".'
       }
     },
     required: ['elementId']
@@ -361,7 +369,7 @@ export function useJarvisLive(
   closePositionFn?: (tradeId: string) => Promise<any>,
   panicCloseAllFn?: () => Promise<any>,
   getMarketPriceFn?: (symbol: string) => Promise<any>,
-  onNavigate?: (destination: string) => void,
+  onNavigate?: (destination: string, symbol?: string, view?: string) => void,
   getAppState?: () => string,
   onHighlight?: (elementId: string) => void,
   memoryModel?: string
@@ -664,9 +672,10 @@ When the user says "buy NEAR" without specifying an amount, use capitalPerTrade 
 
 ${soulContent}
 
-You have access to the user's screen if they shared it, and you can see what they are looking at. You also have access to past conversation summaries to maintain context.
-      
-If the user shares their screen and asks you to analyze a chart, act as an expert technical analyst. Look at the candlestick patterns, trend lines, support/resistance levels, and indicators visible on the screen. Provide a detailed breakdown of the market structure (e.g., Bull Flags, Head and Shoulders, breakouts) and suggest potential trade setups based on the visual data.
+${enableScreenShare
+  ? `[SCREEN VISION: ON] The user has SHARED their screen and you can SEE it in real time. When they ask you to analyze a chart, act as an expert technical analyst: look at the candlestick patterns, trend lines, support/resistance levels, and indicators visible on the screen. Provide a detailed breakdown of the market structure (e.g., Bull Flags, Head and Shoulders, breakouts) and suggest potential trade setups based on the visual data.`
+  : `[SCREEN VISION: OFF] You do NOT currently have access to the user's screen — you cannot see what they are looking at. If the user asks you to look at their screen or a chart, do NOT pretend to see it. Instead tell them to turn on Screen Vision from the menu (you may use highlightElement with "screen-share-button" to point it out), then they can ask again.`}
+You also have access to past conversation summaries to maintain context.
 
 [CURRENT MODE — CRITICAL: You MUST use these values. NEVER ask the user what mode they are in.]
 Trading Mode: ${isPracticeMode ? 'PRACTICE (Paper Trading)' : 'LIVE (Real Money)'}
@@ -699,7 +708,20 @@ TRADING MODES — CRITICAL: You have two trading modes. Do NOT ask for a symbol 
 - SENTRY MODE: Jarvis trades and exits FULLY AUTOMATICALLY. No user approval needed. When the user says "activate sentry mode", "turn on sentry", "go autonomous", "trade automatically", or similar → call switchTradingMode with mode="sentry". Confirm: "Sentry mode activated. I'll handle everything automatically."
 - COPILOT MODE: Jarvis asks the user before placing or closing any trade. When the user says "activate copilot mode", "turn on copilot", "ask me before trading", or similar → call switchTradingMode with mode="copilot". Confirm: "Copilot mode activated. I'll check with you before doing anything."
 If the user asks to start an autonomous learning loop or practice trading session, use the activateSentryMode tool.
-If the user asks to see their history, settings, market, chart, analytics, or home, use the navigateApp tool.
+[APP MAP — you can take the user to ANY of these with the navigateApp tool. NEVER tell the user to click a tab themselves; navigate them. Use destination for the page, view for a sub-tab, symbol for a chart.]
+- home — the main dashboard: portfolio snapshot, today's P&L, the bottom dashboard dock. Dock sub-tabs (view): positions (open trades), pending (trade approvals), sentry (autonomous activity log), intel (news + whale alerts), trades (closed trade history).
+- market — the watchlist / scanner. Sub-tabs (view): crypto, stocks, commodities.
+- chart — price charts. Pass symbol (e.g. "AAPL", "TSLA", "BTC/USDT").
+- history — full trade history page.
+- settings — broker & app settings. Sub-tabs (view): brokers (connected exchanges), apikeys (Gemini/Binance/Telegram keys), alerts (Telegram notifications), style (personality + orb look).
+- analytics — performance dashboard (win rate, P&L curve).
+- risk — Risk Manager: risk grade, exposure, daily-loss bar, risk parameters.
+- brain — Jarvis Brain: the agent swarm, market scanner, goals, campaigns, confidence, market regime, kelly stats, sentiment.
+- memories — your core memories.
+- diary — the decision diary (every trade decision incl. vetoes).
+To navigate: call navigateApp. Examples: "open stocks" → navigateApp(destination="market", view="stocks"). "show me pending approvals" → navigateApp(destination="home", view="pending"). "open API key settings" → navigateApp(destination="settings", view="apikeys"). "take me to the brain" → navigateApp(destination="brain"). "show Apple" → navigateApp(destination="chart", symbol="AAPL").
+To reach a specific SECTION inside the brain or risk pages (e.g. "the market scanner", "kelly stats", "campaigns", "risk parameters"), navigate to that page then use highlightElement with the section id to scroll it into view.
+When the user asks WHICH page or section they are currently on, ALWAYS call getCurrentAppState and answer from its result — do NOT guess from the screen image.
 If you need to know what the user is currently looking at, use the getCurrentAppState tool.
 If the user asks where something is or how to do something, use the highlightElement tool to point it out.
 If the user asks to review their portfolio or trading performance, use the reviewPortfolio tool.
@@ -716,6 +738,8 @@ Available element IDs:
 - "screen-share-button": The monitor icon for screen vision
 - "tab-home", "tab-market", "tab-chart", "tab-history", "tab-settings": The top navigation tabs
 - "dashboard-summary": The bottom dashboard bar showing P&L and active positions
+- Brain page sections (go to brain first): "brain-confidence", "brain-goals", "brain-campaigns", "brain-intel", "brain-regime", "brain-kelly", "brain-sentiment", "brain-scanner"
+- Risk page section: "risk-settings" (Edit Risk Parameters)
 ${morningBriefing}`;
 
       const sessionPromise = ai.live.connect({
@@ -1131,10 +1155,11 @@ ${morningBriefing}`;
                       response = { status: 'error', message: `Failed to execute trade: ${e.message}` };
                     }
                   } else if (call.name === 'navigateApp') {
-                    const { destination } = call.args as any;
+                    const { destination, symbol, view } = call.args as any;
                     if (onNavigate) {
-                      onNavigate(destination);
-                      response = { status: 'success', message: `Navigated to ${destination}` };
+                      onNavigate(destination, symbol, view);
+                      const detail = symbol ? ` showing ${symbol}` : view ? ` (${view})` : '';
+                      response = { status: 'success', message: `Navigated to ${destination}${detail}` };
                     } else {
                       response = { status: 'error', message: 'Navigation not supported' };
                     }
