@@ -23,6 +23,7 @@ interface RiskSettings {
   bleedEndHourIST?: number;    // 0-23
   bleedConfidenceFloor?: number; // 60-100
   autoNavigateTV?: boolean;    // Auto-flip TV chart to symbol swarm is analyzing
+  autoProtectOrphans?: boolean; // Phase 9 (Tier B #2): auto-place 3% SL on orphan positions discovered at boot
 }
 
 interface DashboardData {
@@ -72,6 +73,7 @@ export function RiskManager({ userId }: { userId: string }) {
     bleedEndHourIST: 0,    // 12 AM IST
     bleedConfidenceFloor: 75,
     autoNavigateTV: true,
+    autoProtectOrphans: true, // Phase 9 (Tier B #2) — auto-place 3% SL on discovered orphan positions at boot
   });
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [audit, setAudit] = useState<string | null>(null);
@@ -642,6 +644,31 @@ export function RiskManager({ userId }: { userId: string }) {
                     {settings.autoNavigateTV !== false
                       ? '✅ ON — swarm will navigate your TV chart to the analyzed symbol before running Vision. Best vision coverage, but the bot will change your chart away from whatever you were looking at.'
                       : '⛔ OFF — Vision only fires when your TV chart happens to match what the swarm is analyzing. You stay in full control of your chart; vision rarely fires.'}
+                  </p>
+                </div>
+
+                {/* ─── Auto-Protect Orphans (Phase 9 Tier B #2) ─── */}
+                <div className="border-t border-emerald-500/30 pt-4 mt-1">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <ShieldAlert className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider">Auto-Protect Orphans</span>
+                      <span className="text-[9px] text-zinc-600">(when boot reconciliation finds an unknown position on an exchange)</span>
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <span className="text-[10px] text-zinc-500 uppercase tracking-wide">Enabled</span>
+                      <input
+                        type="checkbox"
+                        checked={settings.autoProtectOrphans !== false}
+                        onChange={e => setSettings({ ...settings, autoProtectOrphans: e.target.checked })}
+                        className="w-4 h-4 accent-emerald-500"
+                      />
+                    </label>
+                  </div>
+                  <p className="text-[9px] text-zinc-600">
+                    {settings.autoProtectOrphans !== false
+                      ? '✅ ON — at boot, any unknown position on your exchange gets a protective 3% stop-loss placed automatically + flagged as "discovered orphan" for your review. Safest default for autonomous trading.'
+                      : '⛔ OFF — orphan positions get flagged via Telegram but no auto-SL is placed. Pick this only if you trade manually on the same exchange and don\'t want surprise stop-losses on positions you opened yourself.'}
                   </p>
                 </div>
 

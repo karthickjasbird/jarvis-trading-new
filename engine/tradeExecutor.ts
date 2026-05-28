@@ -852,9 +852,46 @@ export class TradeExecutor {
       }
     }
 
-    // Crypto verify deferred to Tier B item #2. Return unknown so caller
-    // conservatively retries rather than risking a wrong reconcile.
-    return { gone: null, reason: 'crypto verify deferred to Tier B item #2' };
+    // Phase 9 (Tier B #2) — Crypto verify now uses fetchPositionState from
+    // reconciliation.ts. Closes the v1.6.0 known gap where _verifyPositionGone
+    // returned null for crypto, forcing closeWithRetry to retry-hold loops
+    // on the already-gone case until needs_human at ~15min.
+    try {
+      const brokerConfigsSnap = await this.db.collection('users').doc(userId).collection('brokerConfigs').where('isActive', '==', true).get();
+      if (brokerConfigsSnap.empty) {
+        return { gone: null, reason: 'no active broker config for crypto verify' };
+      }
+      const brokerConfig = brokerConfigsSnap.docs[0].data();
+      let venue: 'binance_spot' | 'binance_futures' | 'bybit_linear' | null = null;
+      let exchange: any = null;
+      if (brokerConfig.brokerName === 'bybit') {
+        venue = 'bybit_linear';
+        const ExchangeClass = (ccxt as any).bybit;
+        exchange = new ExchangeClass({
+          apiKey: brokerConfig.apiKey,
+          secret: brokerConfig.apiSecret,
+          enableRateLimit: true,
+        });
+      } else if (brokerConfig.brokerName === 'binance') {
+        venue = 'binance_spot';
+        const ExchangeClass = (ccxt as any).binance;
+        exchange = new ExchangeClass({
+          apiKey: brokerConfig.apiKey,
+          secret: brokerConfig.apiSecret,
+          enableRateLimit: true,
+        });
+      } else {
+        return { gone: null, reason: `verify unsupported for broker ${brokerConfig.brokerName}` };
+      }
+      const { fetchPositionState } = await import('./reconciliation.ts');
+      const posState = await fetchPositionState(exchange, venue, data.symbol, Number(data.quantity ?? 0));
+      if (!posState.exists) {
+        return { gone: true, reason: posState.reason };
+      }
+      return { gone: false, reason: posState.reason };
+    } catch (err: any) {
+      return { gone: null, reason: `crypto verify error: ${err?.message ?? err}` };
+    }
   }
 
   /**

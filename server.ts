@@ -442,6 +442,25 @@ async function startServer() {
 
   const { PositionMonitor } = await import('./engine/positionMonitor.ts');
   const positionMonitor = new PositionMonitor(db, strategyTracker, marketState, memoryManager, OWNER_USER_ID);
+
+  // Phase 9 (Tier B #2) — boot-time position reconciliation.
+  // Runs AFTER engines init but BEFORE polling loops start, so the first
+  // sentry tick at 5s sees a reconciled DB. Best-effort: if reconciliation
+  // itself fails (network blink, bad API key), we log + continue. Sentry's
+  // tick provides the fallback.
+  try {
+    const { reconcileOpenPositions } = await import('./engine/reconciliation.ts');
+    log("Running boot-time position reconciliation (Tier B #2)...");
+    const report = await reconcileOpenPositions({ db, ownerId: OWNER_USER_ID });
+    log(`  ✓ Reconciliation: ${report.venuesScanned.length} venue(s), ${report.positionsFound} position(s), ${report.alertsTriggered} alert(s)`);
+    if (report.errors.length > 0) {
+      log(`  ⚠️ Reconciliation had ${report.errors.length} non-blocking errors`);
+      report.errors.slice(0, 3).forEach(e => log(`     - ${e.slice(0, 200)}`));
+    }
+  } catch (err: any) {
+    log(`  ⚠️ Reconciliation skipped: ${err?.message ?? err}. Sentry will catch state drift as backup.`);
+  }
+
   setInterval(() => positionMonitor.monitor(), 60 * 1000); // Check stale trades every 60s
   setInterval(() => goalExecutor.monitor(), 60 * 1000); // Check campaign progress every 60s
 

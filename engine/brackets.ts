@@ -344,6 +344,135 @@ async function _placeBinanceFuturesSeparateLeg(params: PlaceBracketParams): Prom
 }
 
 /* ────────────────────────────────────────────────────────────────────
+   placeStopLossOnly — standalone SL placement for an EXISTING position.
+   Used by reconciliation (Tier B #2) to protect:
+     - Discovered orphan positions (exchange has it, Firestore doesn't)
+     - Naked known positions (Firestore says open + no resting SL leg)
+   Different from placeEntryWithStopLoss: no entry order; the position
+   already exists on the exchange. Returns {success, slOrderId} OR
+   {success:false, error} — never throws on brokered errors.
+   ──────────────────────────────────────────────────────────────────── */
+
+export interface StopLossOnlyParams {
+  venue: BracketVenue;
+  exchange: any;
+  symbol: string;
+  closeSide: 'buy' | 'sell';      // OPPOSITE of position entry side
+  quantity: number;                // actual position qty on exchange
+  stopLossPrice: number;
+  slippageBufferPct?: number;
+  clientOrderIdPrefix: string;
+}
+
+export type StopLossOnlyResult =
+  | { success: true; slOrderId: string }
+  | { success: false; error: string };
+
+export async function placeStopLossOnly(p: StopLossOnlyParams): Promise<StopLossOnlyResult> {
+  if (!p.exchange) return { success: false, error: 'no exchange handle' };
+  if (!Number.isFinite(p.quantity) || p.quantity <= 0) {
+    return { success: false, error: `invalid quantity ${p.quantity}` };
+  }
+  if (!Number.isFinite(p.stopLossPrice) || p.stopLossPrice <= 0) {
+    return { success: false, error: `invalid stopLossPrice ${p.stopLossPrice}` };
+  }
+
+  try {
+    switch (p.venue) {
+      case 'alpaca':
+        return await _slOnly_alpaca(p);
+      case 'bybit_linear':
+        return await _slOnly_bybitLinear(p);
+      case 'binance_spot':
+        return await _slOnly_binanceSpot(p);
+      case 'binance_futures':
+        return await _slOnly_binanceFutures(p);
+      default:
+        return { success: false, error: `unsupported venue ${p.venue}` };
+    }
+  } catch (err: any) {
+    return { success: false, error: String(err?.message ?? err) };
+  }
+}
+
+async function _slOnly_alpaca(p: StopLossOnlyParams): Promise<StopLossOnlyResult> {
+  // Standalone stop order via AlpacaConnector.placeStopOrder. OTO bracket
+  // can't attach to an existing position; this is a plain stop_loss order
+  // tied to the position's current quantity.
+  try {
+    const order = await p.exchange.placeStopOrder({
+      symbol: p.symbol,
+      qty: p.quantity,
+      side: p.closeSide,
+      stopPrice: p.stopLossPrice,
+      clientOrderId: `${p.clientOrderIdPrefix}-sl`,
+    });
+    if (!order?.id) return { success: false, error: 'Alpaca stop order returned no ID' };
+    return { success: true, slOrderId: order.id };
+  } catch (err: any) {
+    return { success: false, error: `Alpaca SL-only: ${err?.message ?? err}` };
+  }
+}
+
+async function _slOnly_bybitLinear(p: StopLossOnlyParams): Promise<StopLossOnlyResult> {
+  // Bybit Linear: edit existing position to attach SL via setTradingStop.
+  // ccxt exposes this as exchange.setTradingStop(symbol, params).
+  // Alternative: place a separate STOP_MARKET order with reduceOnly:true.
+  // Going with separate order for consistency with the other 2-call venues.
+  try {
+    const order = await p.exchange.createOrder(
+      p.symbol, 'market', p.closeSide, p.quantity, undefined,
+      {
+        newClientOrderId: `${p.clientOrderIdPrefix}-sl`,
+        triggerPrice: p.stopLossPrice,
+        reduceOnly: true,
+      }
+    );
+    if (!order?.id) return { success: false, error: 'Bybit SL order returned no ID' };
+    return { success: true, slOrderId: order.id };
+  } catch (err: any) {
+    return { success: false, error: `Bybit Linear SL-only: ${err?.message ?? err}` };
+  }
+}
+
+async function _slOnly_binanceSpot(p: StopLossOnlyParams): Promise<StopLossOnlyResult> {
+  const bufferPct = p.slippageBufferPct ?? DEFAULT_SLIPPAGE_BUFFER_PCT;
+  const limitPrice = computeStopLossLimitPrice(p.stopLossPrice, p.closeSide, bufferPct);
+  try {
+    const order = await p.exchange.createOrder(
+      p.symbol, 'STOP_LOSS_LIMIT', p.closeSide, p.quantity, limitPrice,
+      {
+        stopPrice: p.stopLossPrice,
+        newClientOrderId: `${p.clientOrderIdPrefix}-sl`,
+        timeInForce: 'GTC',
+      }
+    );
+    if (!order?.id) return { success: false, error: 'Binance Spot SL order returned no ID' };
+    return { success: true, slOrderId: order.id };
+  } catch (err: any) {
+    return { success: false, error: `Binance Spot SL-only: ${err?.message ?? err}` };
+  }
+}
+
+async function _slOnly_binanceFutures(p: StopLossOnlyParams): Promise<StopLossOnlyResult> {
+  try {
+    const order = await p.exchange.createOrder(
+      p.symbol, 'STOP_MARKET', p.closeSide, undefined, undefined,
+      {
+        stopPrice: p.stopLossPrice,
+        closePosition: true,
+        workingType: 'MARK_PRICE',
+        newClientOrderId: `${p.clientOrderIdPrefix}-sl`,
+      }
+    );
+    if (!order?.id) return { success: false, error: 'Binance Futures SL order returned no ID' };
+    return { success: true, slOrderId: order.id };
+  } catch (err: any) {
+    return { success: false, error: `Binance Futures SL-only: ${err?.message ?? err}` };
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────
    Emergency close — last-resort liquidation after SL placement failed.
    If THIS also fails, the position is genuinely naked AND we can't fix
    it programmatically. The caller must treat sl_failed_emergency_failed

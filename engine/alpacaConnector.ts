@@ -284,6 +284,54 @@ export class AlpacaConnector {
   }
 
   /**
+   * Phase 9 (Tier B #2) — Boot-reconciliation list helpers.
+   * listPositions returns all open positions; listOpenOrders returns
+   * all open orders with nested children (OTO/bracket legs).
+   */
+  async listPositions(): Promise<AlpacaPosition[]> {
+    return this.request<AlpacaPosition[]>(this.tradingHost, '/v2/positions');
+  }
+
+  async listOpenOrders(opts: { nested?: boolean; limit?: number } = {}): Promise<AlpacaOrder[]> {
+    const nested = opts.nested ? 'true' : 'false';
+    const limit = opts.limit ?? 500;
+    return this.request<AlpacaOrder[]>(
+      this.tradingHost,
+      `/v2/orders?status=open&nested=${nested}&limit=${limit}&direction=desc`
+    );
+  }
+
+  /**
+   * Phase 9 (Tier B #2) — Place a standalone stop order to protect an
+   * existing position. Used by reconciliation when a naked position
+   * is found on the exchange (orphan or known-naked).
+   */
+  async placeStopOrder(params: {
+    symbol: string;
+    qty: number;
+    side: 'buy' | 'sell';
+    stopPrice: number;
+    clientOrderId?: string;
+  }): Promise<AlpacaOrder> {
+    if (params.qty <= 0 || !Number.isFinite(params.qty)) {
+      throw new Error(`[ALPACA] placeStopOrder: invalid qty ${params.qty}`);
+    }
+    const body = JSON.stringify({
+      symbol: params.symbol,
+      qty: String(params.qty),
+      side: params.side,
+      type: 'stop',
+      time_in_force: 'gtc',
+      stop_price: String(params.stopPrice),
+      ...(params.clientOrderId ? { client_order_id: params.clientOrderId } : {}),
+    });
+    return this.request<AlpacaOrder>(this.tradingHost, '/v2/orders', {
+      method: 'POST',
+      body,
+    });
+  }
+
+  /**
    * Close an entire position (or a fraction via qty). Alpaca's DELETE
    * /v2/positions/{symbol} endpoint submits a closing market order and
    * returns the resulting order object.
