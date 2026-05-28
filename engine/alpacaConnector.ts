@@ -194,14 +194,15 @@ export class AlpacaConnector {
     symbol: string,
     side: 'buy' | 'sell',
     qty: number,
-    opts: { clientOrderId?: string } = {}
+    opts: { clientOrderId?: string; stopLossPrice?: number } = {}
   ): Promise<AlpacaOrder> {
     if (qty <= 0 || !Number.isFinite(qty)) {
       throw new Error(`[ALPACA] invalid qty: ${qty}`);
     }
     // Phase 9 (#11) — optional client_order_id for exchange-layer idempotency.
-    // When provided, Alpaca rejects duplicate submissions within its retention
-    // window. closeRetry.ts generates these IDs deterministically per tradeId.
+    // Phase 9 (Tier B #1) — optional stopLossPrice activates OTO bracket
+    // (One-Triggers-Other). Order class becomes 'oto' with a stop_loss leg.
+    // Per Alpaca docs: 'bracket' requires BOTH legs; 'oto' accepts just one.
     const body = JSON.stringify({
       symbol,
       qty: String(qty),
@@ -209,6 +210,10 @@ export class AlpacaConnector {
       type: 'market',
       time_in_force: 'day',
       ...(opts.clientOrderId ? { client_order_id: opts.clientOrderId } : {}),
+      ...(opts.stopLossPrice ? {
+        order_class: 'oto',
+        stop_loss: { stop_price: String(opts.stopLossPrice) },
+      } : {}),
     });
     return this.request<AlpacaOrder>(this.tradingHost, '/v2/orders', {
       method: 'POST',
@@ -227,7 +232,7 @@ export class AlpacaConnector {
     symbol: string,
     side: 'buy' | 'sell',
     qty: number,
-    opts: { clientOrderId?: string } = {}
+    opts: { clientOrderId?: string; stopLossPrice?: number } = {}
   ): Promise<{
     id: string;
     average: number | null;
@@ -261,6 +266,21 @@ export class AlpacaConnector {
       if (/404/.test(err?.message || '')) return null;
       throw err;
     }
+  }
+
+  /**
+   * Cancel an order by ID. Used by closeWithRetry to cancel a resting
+   * SL leg after a manual / sentry close fires — otherwise the orphan
+   * SL could trigger later and create a phantom short.
+   *
+   * Returns void on success. Throws on real errors. Caller should swallow
+   * "order not found" / 404 since that means the order is already gone
+   * (filled or cancelled by the exchange).
+   */
+  async cancelOrder(orderId: string): Promise<void> {
+    await this.request<void>(this.tradingHost, `/v2/orders/${encodeURIComponent(orderId)}`, {
+      method: 'DELETE',
+    });
   }
 
   /**

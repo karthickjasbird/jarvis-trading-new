@@ -15,6 +15,11 @@ import {
   generatePartialClientOrderId,
   type CloseErrorClassification,
 } from './closeRetry.ts';
+import {
+  placeEntryWithStopLoss,
+  type BracketVenue,
+  type BracketResult,
+} from './brackets.ts';
 
 export class TradeExecutor {
   private db: FirebaseFirestore.Firestore;
@@ -188,8 +193,16 @@ export class TradeExecutor {
     }
 
     let fillPrice = price;
-    let orderId = `paper-order-${Date.now()}`;
     let executedQuantity = Number(quantity);
+
+    // Phase 9 (Tier B #1) — pre-reserve the trade doc ID so we can derive a
+    // deterministic clientOrderIdPrefix from it BEFORE placing the entry.
+    // This makes the bracket placement idempotent across retries.
+    const tradeRef = this.db.collection('trades').doc();
+    const tradeId = tradeRef.id;
+    const clientOrderIdPrefix = `jve-${tradeId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 24)}`;
+    let orderId = `paper-order-${Date.now()}`;
+    let bracketResult: BracketResult | null = null;
 
     // SAFETY GUARD: Double-check before real money execution
     if (!isPractice && (mode === 'live' || mode === 'autonomous' || mode === 'sentry')) {
@@ -218,12 +231,20 @@ export class TradeExecutor {
 
       const brokerConfig = brokerConfigsSnapshot.docs[0].data();
 
+      // Phase 9 (Tier B #1) — Map broker to bracket venue. Null = no native
+      // brackets in v1 (Zerodha deferred to v1.5).
+      let bracketVenue: BracketVenue | null = null;
+      if (brokerConfig.brokerName === 'alpaca') bracketVenue = 'alpaca';
+      else if (brokerConfig.brokerName === 'bybit') bracketVenue = 'bybit_linear';
+      else if (brokerConfig.brokerName === 'binance') bracketVenue = 'binance_spot';
+
       try {
         if (brokerConfig.brokerName === 'zerodha') {
+          // OLD PATH — Zerodha brackets deferred to v1.5 (no native primitive)
           if (!brokerConfig.accessToken) throw new Error("Zerodha access token missing. Please login via settings.");
           const kc = new KiteConnect({ api_key: brokerConfig.apiKey });
           kc.setAccessToken(brokerConfig.accessToken);
-          
+
           const order = await kc.placeOrder("regular", {
             exchange: "NSE",
             tradingsymbol: symbol,
@@ -233,32 +254,62 @@ export class TradeExecutor {
             order_type: "MARKET"
           });
           orderId = order.order_id;
-          // In a real app, we'd fetch the actual fill price from the orderbook.
-        } else if (['binance', 'bybit'].includes(brokerConfig.brokerName)) {
-          const exchangeClass = (ccxt as any)[brokerConfig.brokerName];
-          const exchange = new exchangeClass({
-            apiKey: brokerConfig.apiKey,
-            secret: brokerConfig.apiSecret,
-            enableRateLimit: true,
+        } else if (bracketVenue) {
+          // NEW PATH — bracket-aware entry placement.
+          //
+          // SAFETY: every live entry on a bracket-capable venue MUST have a
+          // stopLossPrice. Without one, the position would have no SL — the
+          // exact bug brackets exist to prevent. Refuse cleanly.
+          if (!stopLossPrice) {
+            throw new Error(`Live entry on ${bracketVenue} requires stopLossPrice — refusing to place a naked position`);
+          }
+
+          let exchange: any;
+          if (bracketVenue === 'alpaca') {
+            exchange = new AlpacaConnector({
+              apiKeyId: brokerConfig.apiKey,
+              secretKey: brokerConfig.apiSecret,
+              paper: false,
+            });
+          } else {
+            const exchangeClass = (ccxt as any)[brokerConfig.brokerName];
+            exchange = new exchangeClass({
+              apiKey: brokerConfig.apiKey,
+              secret: brokerConfig.apiSecret,
+              enableRateLimit: true,
+            });
+          }
+
+          bracketResult = await placeEntryWithStopLoss({
+            venue: bracketVenue,
+            exchange,
+            symbol,
+            side,
+            quantity: executedQuantity,
+            stopLossPrice,
+            clientOrderIdPrefix,
           });
 
-          // LIVE MODE: Never use sandbox — user has explicitly switched to live/real money
+          orderId = bracketResult.entryOrderId || `bracket-failed-${Date.now()}`;
+          fillPrice = bracketResult.entryFillPrice ?? price;
+          executedQuantity = bracketResult.entryFilledQty || executedQuantity;
 
-          const order = await exchange.createMarketOrder(symbol, side, executedQuantity);
-          orderId = order.id;
-          fillPrice = order.average || order.price || price;
-          executedQuantity = order.filled || executedQuantity;
-        } else if (brokerConfig.brokerName === 'alpaca') {
-          // brokerConfig.apiKey = Alpaca key ID, apiSecret = secret key.
-          const alpaca = new AlpacaConnector({
-            apiKeyId: brokerConfig.apiKey,
-            secretKey: brokerConfig.apiSecret,
-            paper: false,
-          });
-          const order = await alpaca.createMarketOrder(symbol, side, executedQuantity);
-          orderId = order.id;
-          fillPrice = order.average ?? price;
-          executedQuantity = order.filled || executedQuantity;
+          // Worst case — naked position AND emergency close failed. Alert loudly.
+          // The trade write below tags the doc as needs_human so Sentry skips it.
+          if (bracketResult.bracketPlacementStatus === 'sl_failed_emergency_failed') {
+            console.error(`[EXECUTE] 💀 NAKED LIVE POSITION for ${symbol} ${side} ${executedQuantity}: ${bracketResult.errorDetail}`);
+            try {
+              await sendTelegramNotification(this.db, userId,
+                `💀 <b>CRITICAL: NAKED LIVE POSITION</b>\n\n` +
+                `${side.toUpperCase()} ${executedQuantity} ${symbol}\n` +
+                `Entry order: <code>${orderId}</code>\n` +
+                `SL placement FAILED AND emergency close FAILED.\n` +
+                `Position is OPEN on the exchange WITHOUT stop-loss protection.\n\n` +
+                `<b>MANUAL ACTION REQUIRED</b> — close the position on the exchange directly.\n\n` +
+                `Error: ${bracketResult.errorDetail ?? 'unknown'}`
+              );
+            } catch {}
+          }
         } else {
           throw new Error(`Unsupported live broker: ${brokerConfig.brokerName}`);
         }
@@ -268,7 +319,10 @@ export class TradeExecutor {
       }
     }
 
-    const tradeRef = this.db.collection('trades').doc();
+    // Phase 9 (Tier B #1) — Persist bracket placement state so Sentry +
+    // closeWithRetry can act on it. needs_human flag for the worst-case
+    // routes through the existing shouldSentrySkip + closeWithRetry guards.
+    const isNakedNeedsHuman = bracketResult?.bracketPlacementStatus === 'sl_failed_emergency_failed';
     const trade = {
       userId,
       symbol,
@@ -286,7 +340,20 @@ export class TradeExecutor {
       profitTarget: profitTarget || null,
       highestPrice: side === 'buy' ? fillPrice : null,
       lowestPrice: side === 'sell' ? fillPrice : null,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      // Phase 9 (Tier B #1) bracket fields
+      bracketOrderIds: bracketResult ? {
+        entry: bracketResult.entryOrderId,
+        stopLoss: bracketResult.stopLossOrderId,
+      } : null,
+      bracketPlacementStatus: bracketResult?.bracketPlacementStatus ?? null,
+      bracketErrorDetail: bracketResult?.errorDetail ?? null,
+      // Worst-case: tag as needs_human so Sentry's shouldSentrySkip catches it
+      ...(isNakedNeedsHuman ? {
+        closeFailureClass: 'needs_human',
+        closeFailureReason: 'Naked live position — bracket SL placement + emergency close BOTH failed. Manual exchange close required.',
+        closeFailedAt: new Date().toISOString(),
+      } : {}),
     };
 
     await tradeRef.set(trade);
@@ -392,6 +459,22 @@ export class TradeExecutor {
             );
             exitOrderId = order.id;
             currentPrice = order.average || order.price || currentPrice;
+
+            // Phase 9 (Tier B #1) — cancel resting SL leg after close fires.
+            // Without this, the orphan SL could trigger on a later price tick
+            // and create a phantom short. Cancel is best-effort: "order not
+            // found" means already gone (filled or auto-cancelled), fine.
+            const slLegId = data.bracketOrderIds?.stopLoss;
+            if (slLegId) {
+              try {
+                await exchange.cancelOrder(slLegId, data.symbol);
+              } catch (cancelErr: any) {
+                const msg = String(cancelErr?.message ?? '').toLowerCase();
+                if (!msg.includes('not found') && !msg.includes('does not exist') && !msg.includes('-2013')) {
+                  console.warn(`[closePosition] SL leg ${slLegId} cancel failed: ${cancelErr.message}. Will reconcile on next boot (Tier B #2).`);
+                }
+              }
+            }
           } else if (brokerConfig.brokerName === 'alpaca') {
             const alpaca = new AlpacaConnector({
               apiKeyId: brokerConfig.apiKey,
@@ -404,6 +487,19 @@ export class TradeExecutor {
             );
             exitOrderId = order.id;
             currentPrice = order.average ?? currentPrice;
+
+            // Phase 9 (Tier B #1) — cancel resting SL leg, same rationale as above.
+            const slLegId = data.bracketOrderIds?.stopLoss;
+            if (slLegId) {
+              try {
+                await alpaca.cancelOrder(slLegId);
+              } catch (cancelErr: any) {
+                const msg = String(cancelErr?.message ?? '').toLowerCase();
+                if (!msg.includes('404') && !msg.includes('not found')) {
+                  console.warn(`[closePosition] Alpaca SL leg ${slLegId} cancel failed: ${cancelErr.message}. Will reconcile on next boot.`);
+                }
+              }
+            }
           }
         } catch (error: any) {
           console.error("Live close execution failed:", error);
