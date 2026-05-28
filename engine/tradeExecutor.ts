@@ -381,9 +381,17 @@ export class TradeExecutor {
       .where('isPractice', '==', isPracticeMode)
       .get();
 
-    return snapshot.docs.map(doc => {
+    return Promise.all(snapshot.docs.map(async doc => {
       const data = doc.data();
-      const currentPrice = this.marketState[data.symbol]?.price || data.entryPrice;
+      // Prefer the live WS price (free); fall back to a fetched quote so
+      // unrealized P&L survives a server restart and works for stocks (which
+      // are never in the crypto-only WS feed), then to entryPrice.
+      let currentPrice = this.marketState[data.symbol]?.price;
+      if (!currentPrice) {
+        const assetClass = this.resolveAssetClass(data.market, data.symbol);
+        const fetched = await this.fetchMarketPrice(data.symbol, assetClass, userId, isPracticeMode);
+        currentPrice = fetched || data.entryPrice;
+      }
       const isLong = data.side === 'buy';
       const priceDiff = currentPrice - data.entryPrice;
       const unrealizedPnl = isLong ? (priceDiff * data.quantity) : (-priceDiff * data.quantity);
@@ -394,7 +402,7 @@ export class TradeExecutor {
         currentPrice,
         unrealizedPnl
       };
-    });
+    }));
   }
 
   async closePosition(userId: string, tradeId: string) {
@@ -1175,7 +1183,7 @@ export class TradeExecutor {
       else if (pnl < 0) lossCount++;
     });
 
-    const openPositions = await this.getOpenPositions(userId);
+    const openPositions = await this.getOpenPositions(userId, isPracticeMode);
     const unrealizedPnl = openPositions.reduce((sum, pos) => sum + pos.unrealizedPnl, 0);
 
     return {
