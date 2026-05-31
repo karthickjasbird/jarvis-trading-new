@@ -181,6 +181,45 @@ export class AlpacaConnector {
     return (res?.bars || []) as AlpacaBar[];
   }
 
+  /**
+   * Historical bars over a date range with automatic pagination.
+   * Used by the backtest harness (scratch/turtle-backtest.ts) to pull years of
+   * intraday data — Alpaca's per-request `limit` caps at 10000, and a year of
+   * 15-min bars across regular trading hours is ~6500 bars, so multi-year pulls
+   * need the page_token loop.
+   *
+   *   start, end: ISO-8601 (e.g., '2022-01-01T00:00:00Z')
+   *   timeframe : '1Min' | '5Min' | '15Min' | '1Hour' | '4Hour' | '1Day'
+   *
+   * Free IEX tier provides historical bars across all standard timeframes.
+   * Real-time SIP is paid but is NOT needed for historical backtests.
+   */
+  async getHistoricalBars(symbol: string, timeframe: TimeframeUnit, start: string, end: string): Promise<AlpacaBar[]> {
+    const enc = encodeURIComponent(symbol);
+    const out: AlpacaBar[] = [];
+    let pageToken: string | undefined;
+    let pages = 0;
+    do {
+      const params = new URLSearchParams({
+        timeframe,
+        start,
+        end,
+        limit: '10000',
+        adjustment: 'raw',
+        feed: 'iex',  // free tier
+      });
+      if (pageToken) params.set('page_token', pageToken);
+      const res = await this.request<any>(this.dataHost, `/v2/stocks/${enc}/bars?${params}`);
+      const bars: AlpacaBar[] = res?.bars || [];
+      out.push(...bars);
+      pageToken = res?.next_page_token;
+      pages++;
+      // Safety: if Alpaca returns next_page_token endlessly, break after ~50 pages = 500k bars
+      if (pages >= 50) break;
+    } while (pageToken);
+    return out;
+  }
+
   // ──────────────────────────────────────────────────────────
   // Orders / positions
   // ──────────────────────────────────────────────────────────
