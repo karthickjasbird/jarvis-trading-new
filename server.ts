@@ -155,7 +155,7 @@ async function startServer() {
       useLegacySwarm: process.env.USE_LEGACY_SWARM === 'true',
       // For display in the brain page
       engine: process.env.USE_LEGACY_SWARM === 'true' ? 'legacy-swarm' : 'rules-orchestrator',
-      version: 'v1.7.0',
+      version: 'v1.7.2',
     });
   });
 

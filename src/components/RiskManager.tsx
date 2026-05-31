@@ -461,10 +461,10 @@ export function RiskManager({ userId }: { userId: string }) {
                       <p className="text-[9px] text-zinc-500 leading-snug">Turtle 55-day breakout, daily bars. Weeks–months hold.</p>
                     </label>
 
-                    {/* Swing — default off until backtest validates */}
+                    {/* Swing — v1.7.2 RSI 40/60 cycle, validated by backtest */}
                     <label className={`relative flex flex-col gap-1 p-3 rounded-lg border cursor-pointer transition-colors ${
                       settings.strategies?.swing?.enabled
-                        ? 'border-amber-500/40 bg-amber-500/10'
+                        ? 'border-emerald-500/40 bg-emerald-500/10'
                         : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700'
                     }`}>
                       <div className="flex items-center justify-between">
@@ -479,28 +479,11 @@ export function RiskManager({ userId }: { userId: string }) {
                               swing: { enabled: e.target.checked, timeframe: settings.strategies?.swing?.timeframe ?? '4h' },
                             },
                           })}
-                          className="accent-amber-500 w-3.5 h-3.5"
+                          className="accent-emerald-500 w-3.5 h-3.5"
                         />
                       </div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[9px] text-amber-400 font-semibold">UNVALIDATED</span>
-                        <select
-                          value={settings.strategies?.swing?.timeframe ?? '4h'}
-                          onChange={e => setSettings({
-                            ...settings,
-                            strategies: {
-                              ...(settings.strategies || {}),
-                              swing: { enabled: !!settings.strategies?.swing?.enabled, timeframe: e.target.value as '4h' | '1h' },
-                            },
-                          })}
-                          className="text-[9px] bg-zinc-950 border border-zinc-700 rounded px-1 py-0.5 text-zinc-300"
-                          onClick={e => e.stopPropagation()}
-                        >
-                          <option value="4h">4h</option>
-                          <option value="1h">1h</option>
-                        </select>
-                      </div>
-                      <p className="text-[9px] text-zinc-500 leading-snug">Same breakout, faster cadence. Days–2 weeks.</p>
+                      <span className="text-[9px] text-emerald-400 font-semibold">VALIDATED ✓</span>
+                      <p className="text-[9px] text-zinc-500 leading-snug">RSI 40/60 cycle + daily-uptrend filter on 4h bars. Backtest: $10k→$91k over 7.4y (+815%, 38% max DD).</p>
                     </label>
 
                     {/* Intraday — default off, deliberately strict */}

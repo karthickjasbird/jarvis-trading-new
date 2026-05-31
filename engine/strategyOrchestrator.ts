@@ -23,7 +23,7 @@ import { TechnicalAnalysisEngine } from './technicalAnalysis.ts';
 import { resolveAlpacaConnector } from './alpacaCreds.ts';
 import { fetchCryptoSignals, fetchStockSignals, type TvSignal } from './tvSignals.ts';
 import { positionStrategy } from './strategies/position.ts';
-import { swingStrategy, SWING_4H_PARAMS, SWING_1H_PARAMS } from './strategies/swing.ts';
+import { swingStrategy } from './strategies/swing.ts';
 import { intradayStrategy } from './strategies/intraday.ts';
 import type { Candle, StrategyContext, TradeCandidate, Timeframe } from './strategies/types.ts';
 
@@ -172,19 +172,22 @@ function runStrategiesForTimeframe(
   tvSignals: Map<string, TvSignal>,
   equityUsd: number,
   cfg: UserStrategyConfig,
+  dailyCandleMap?: Map<string, Candle[]>,
 ): TradeCandidate[] {
   const out: TradeCandidate[] = [];
   for (const [symbol, candles] of candleMap.entries()) {
     const ctx: StrategyContext = {
       symbol, candles, equityUsd,
       tvSignal: tvSignals.get(symbol) ?? null,
+      dailyCandles: dailyCandleMap?.get(symbol),
     };
     let candidate: TradeCandidate | null = null;
     if (tf === 'position' && cfg.enabled.position) {
       candidate = positionStrategy(ctx);
     } else if (tf === 'swing' && cfg.enabled.swing) {
-      const params = cfg.swingTimeframe === '1h' ? SWING_1H_PARAMS : SWING_4H_PARAMS;
-      candidate = swingStrategy(ctx, params);
+      // v1.7.2 — swingStrategy is now RSI 40/60 cycle + daily-uptrend filter.
+      // Requires ctx.dailyCandles; orchestrator fetches them in the swing branch below.
+      candidate = swingStrategy(ctx);
     } else if (tf === 'intraday' && cfg.enabled.intraday) {
       candidate = intradayStrategy(ctx);
     }
@@ -241,17 +244,27 @@ export async function runOrchestrator(deps: OrchestratorDeps, opts: Orchestrator
     const interval = timeframeToInterval(tf, cfg.swingTimeframe);
     const limit = candleLimitFor(tf);
 
+    // v1.7.2 — swing strategy needs daily context for its uptrend filter.
+    // Fetch daily bars for every basket symbol when running the swing timeframe.
+    const needDaily = tf === 'swing';
+    let dailyCrypto: Map<string, Candle[]> | undefined;
+    let dailyStocks: Map<string, Candle[]> | undefined;
+    if (needDaily) {
+      if (cryptoBasket.length) dailyCrypto = await fetchCryptoCandles(ta, cryptoBasket, '1d', 250);
+      if (stockBasket.length) dailyStocks = await fetchStockCandles(db, ownerUserId, stockBasket, '1d', 250);
+    }
+
     // CRYPTO
     if (cryptoBasket.length) {
       const candles = await fetchCryptoCandles(ta, cryptoBasket, interval, limit);
-      const found = runStrategiesForTimeframe(tf, candles, tvCrypto, opts.equityUsd, cfg);
+      const found = runStrategiesForTimeframe(tf, candles, tvCrypto, opts.equityUsd, cfg, dailyCrypto);
       allCandidates.push(...found);
     }
 
     // STOCKS
     if (stockBasket.length) {
       const candles = await fetchStockCandles(db, ownerUserId, stockBasket, interval, limit);
-      const found = runStrategiesForTimeframe(tf, candles, tvStocks, opts.equityUsd, cfg);
+      const found = runStrategiesForTimeframe(tf, candles, tvStocks, opts.equityUsd, cfg, dailyStocks);
       allCandidates.push(...found);
     }
   }

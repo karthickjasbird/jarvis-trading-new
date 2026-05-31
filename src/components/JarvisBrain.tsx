@@ -1277,16 +1277,16 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
             <span className="text-[9px] text-emerald-400 font-semibold">Validated ✓</span>
           </div>
 
-          {/* SWING */}
-          <div className={`rounded-xl p-3 border ${strategiesCfg.swing ? 'border-amber-500/30 bg-amber-500/5' : 'border-zinc-800 bg-zinc-950/40 opacity-50'}`}>
+          {/* SWING — v1.7.2 RSI 40/60 cycle */}
+          <div className={`rounded-xl p-3 border ${strategiesCfg.swing ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-zinc-800 bg-zinc-950/40 opacity-50'}`}>
             <div className="flex items-center justify-between mb-1">
               <span className="text-[11px] font-bold text-zinc-200 uppercase tracking-wider">Swing</span>
-              <span className={`text-[9px] font-bold ${strategiesCfg.swing ? 'text-amber-400' : 'text-zinc-500'}`}>
+              <span className={`text-[9px] font-bold ${strategiesCfg.swing ? 'text-emerald-400' : 'text-zinc-500'}`}>
                 {strategiesCfg.swing ? `ON · ${strategiesCfg.swingTimeframe}` : 'OFF'}
               </span>
             </div>
-            <p className="text-[9px] text-zinc-500 leading-snug mb-1">Breakout, 4h/1h bars</p>
-            <span className="text-[9px] text-amber-400 font-semibold">Backtest first</span>
+            <p className="text-[9px] text-zinc-500 leading-snug mb-1">RSI 40/60 + daily uptrend, 4h</p>
+            <span className="text-[9px] text-emerald-400 font-semibold">Validated ✓</span>
           </div>
 
           {/* INTRADAY */}

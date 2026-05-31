@@ -473,18 +473,16 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* v1.7.0 — system-level safety pill. Reflects LIVE_TRADING_DISABLED env
-          flag (NOT the user-toggleable practice mode). Always visible when the
-          flag is on; tells the user no real-money trade can leave this machine. */}
+      {/* v1.7.1 — system-level safety latch. Tiny corner indicator. Always
+          visible when LIVE_TRADING_DISABLED=true. Hover for the full story. */}
       {systemSafety?.liveTradingDisabled && (
         <div
-          className="absolute top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto"
-          title="LIVE_TRADING_DISABLED is set in .env — every trade is paper. Voice cannot turn this off; only manual .env edit can."
+          className="fixed bottom-3 right-3 z-30 pointer-events-auto"
+          title="LIVE_TRADING_DISABLED=true in .env. Every trade is paper regardless of the mode toggle. Voice cannot turn this off — only manual .env edit can."
         >
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold tracking-wider shadow-[0_0_20px_rgba(16,185,129,0.15)] backdrop-blur-md">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            🔒 PAPER ONLY
-            <span className="text-emerald-500/60 font-mono normal-case">{systemSafety.version}</span>
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400/80 text-[9px] font-semibold tracking-wide backdrop-blur-md hover:bg-emerald-500/15 hover:text-emerald-300 transition-colors">
+            <span className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
+            🔒 paper
           </div>
         </div>
       )}

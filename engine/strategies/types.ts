@@ -22,9 +22,13 @@ export type Timeframe = 'position' | 'swing' | 'intraday';
 
 export interface StrategyContext {
   symbol: string;
-  candles: Candle[];          // ordered ascending; last entry = most recent CLOSED bar
+  candles: Candle[];          // ordered ascending on the primary timeframe; last = most recent CLOSED bar
   tvSignal?: TvSignal | null; // optional TV ratings (orchestrator fetches once per scan)
   equityUsd: number;          // current account equity (for sizing)
+  /** v1.7.2 — optional daily-timeframe candles for higher-timeframe context
+   *  (used by swing-rsi-cycle for the uptrend filter). The orchestrator fetches
+   *  these when the active strategy module needs them. */
+  dailyCandles?: Candle[];
 }
 
 export interface TradeCandidate {
@@ -124,6 +128,29 @@ export function avgVolume(candles: Candle[], lookback: number): number {
   let s = 0;
   for (let i = n - lookback - 1; i < n - 1; i++) s += candles[i].volume;
   return s / lookback;
+}
+
+/** Simple EMA over close prices, returning only the final value. NaN if too short. */
+export function emaLast(candles: Candle[], period: number): number {
+  const n = candles.length;
+  if (n < period) return NaN;
+  // Seed with SMA of first `period` bars, then walk forward.
+  let v = 0;
+  for (let i = 0; i < period; i++) v += candles[i].close;
+  v /= period;
+  const k = 2 / (period + 1);
+  for (let i = period; i < n; i++) v = candles[i].close * k + v * (1 - k);
+  return v;
+}
+
+/** Returns true if the daily 50-EMA is rising AND last close > the EMA. */
+export function dailyUptrendOk(dailyCandles: Candle[] | undefined, period = 50): boolean {
+  if (!dailyCandles || dailyCandles.length < period + 5) return false;
+  const cur = emaLast(dailyCandles, period);
+  const prev = emaLast(dailyCandles.slice(0, -5), period);
+  const close = dailyCandles[dailyCandles.length - 1].close;
+  if (!Number.isFinite(cur) || !Number.isFinite(prev)) return false;
+  return close > cur && cur > prev;
 }
 
 /** Sizing: units(coins) = (equity * riskPct) / N. Capped by cash availability. */
