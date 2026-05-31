@@ -10,7 +10,7 @@
  * the same mistake twice.
  */
 
-import { generateTextForPurpose } from './modelRouter.ts';
+// v1.7.0 — per-trade LLM grading removed; deterministic grading by P&L %.
 import { TechnicalAnalysisEngine } from './technicalAnalysis.ts';
 import { MemoryManager } from './memory.ts';
 import { TradeDiaryEngine } from './tradeDiary.ts';
@@ -75,36 +75,23 @@ export class PostMortemEngine {
       }
     } catch {}
 
-    const prompt = `You are a trading post-mortem analyst. Analyze this completed trade:
-
-Symbol: ${trade.symbol}
-Side: ${trade.side.toUpperCase()}
-Entry: $${trade.entryPrice}
-Exit: $${trade.exitPrice}
-P&L: ${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)} (${trade.pnlPercent >= 0 ? '+' : ''}${trade.pnlPercent.toFixed(2)}%)
-Close Reason: ${trade.closeReason}
-${currentTA}
-
-Respond in this EXACT JSON format (no markdown):
-{
-  "analysis": "2-3 sentence analysis of what happened and why",
-  "lessons": ["lesson 1", "lesson 2"],
-  "grade": "A"
-}
-
-Grading:
-- A: Excellent execution, proper entry/exit
-- B: Good trade, minor issues
-- C: Average, some mistakes
-- D: Poor execution, should have been avoided
-- F: Terrible, clear signal was ignored
-
-Be specific. Reference the actual numbers.`;
-
+    // v1.7.0 — per-trade LLM grading removed. Deterministic grading by P&L %
+    // (the rules engine doesn't consume the prose narrative; the swarm/Scholar
+    // that did consume it is gated off). Set ENABLE_POSTMORTEM_LLM=true to
+    // restore per-trade Gemini grading; default off saves ~$2/month.
     try {
-      const response = await generateTextForPurpose('post-mortem', prompt);
-      const cleaned = response.replace(/```json?|```/g, '').trim();
-      const result = JSON.parse(cleaned);
+      const grade: PostMortemReport['grade'] =
+        trade.pnlPercent >= 3 ? 'A' :
+        trade.pnlPercent >= 1 ? 'B' :
+        trade.pnlPercent >= -1 ? 'C' :
+        trade.pnlPercent >= -3 ? 'D' : 'F';
+      const direction = trade.pnl >= 0 ? 'win' : 'loss';
+      const sideTxt = trade.side.toUpperCase();
+      const analysis = `${sideTxt} on ${trade.symbol}: entry $${trade.entryPrice}, exit $${trade.exitPrice}, ${direction} of ${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)} (${trade.pnlPercent >= 0 ? '+' : ''}${trade.pnlPercent.toFixed(2)}%). Closed via ${trade.closeReason}. ${currentTA || ''}`.trim();
+      const lessons: string[] = [];
+      if (trade.pnlPercent <= -1) lessons.push(`Loss of ${trade.pnlPercent.toFixed(2)}% on ${trade.closeReason}`);
+      if (trade.pnlPercent >= 3) lessons.push(`Winner ran ${trade.pnlPercent.toFixed(2)}% — let-winners-run rule worked`);
+      if (trade.closeReason?.toLowerCase().includes('stop')) lessons.push('Stop hit — losing trade contained as designed');
 
       const report: PostMortemReport = {
         tradeId: trade.tradeId,
@@ -116,9 +103,9 @@ Be specific. Reference the actual numbers.`;
         pnl: trade.pnl,
         pnlPercent: trade.pnlPercent,
         reason: trade.closeReason,
-        analysis: result.analysis,
-        lessons: result.lessons || [],
-        grade: result.grade || 'C',
+        analysis,
+        lessons,
+        grade,
         timestamp: new Date().toISOString(),
       };
 

@@ -2,6 +2,7 @@ import ccxt from 'ccxt';
 import { KiteConnect } from 'kiteconnect';
 import { sendTelegramNotification } from './telegram.ts';
 import { AlpacaConnector, detectAssetClass } from './alpacaConnector.ts';
+import { resolveAlpacaConnector, ALPACA_CREDS_NOT_CONFIGURED_MSG } from './alpacaCreds.ts';
 import { RiskGate } from './riskGate.ts';
 import { MemoryManager } from './memory.ts';
 import { PostMortemEngine } from './postMortem.ts';
@@ -63,38 +64,9 @@ export class TradeExecutor {
    * Symmetric with `marketScanner.getAlpacaCreds`.
    */
   private async getAlpacaConnector(userId: string, isPaper: boolean): Promise<AlpacaConnector> {
-    let apiKeyId = '';
-    let secretKey = '';
-    try {
-      const doc = await this.db
-        .collection('users').doc(userId)
-        .collection('secrets').doc('apiKeys').get();
-      if (doc.exists) {
-        const data: any = doc.data() || {};
-        apiKeyId = data.alpacaApiKeyId || '';
-        secretKey = data.alpacaSecretKey || '';
-      }
-    } catch {}
-    if (!apiKeyId || !secretKey) {
-      try {
-        const snap = await this.db
-          .collection('users').doc(userId)
-          .collection('brokerConfigs')
-          .where('brokerName', '==', 'alpaca')
-          .limit(1).get();
-        if (!snap.empty) {
-          const data: any = snap.docs[0].data() || {};
-          apiKeyId = apiKeyId || data.apiKey || '';
-          secretKey = secretKey || data.apiSecret || '';
-        }
-      } catch {}
-    }
-    apiKeyId = apiKeyId || process.env.ALPACA_API_KEY_ID || '';
-    secretKey = secretKey || process.env.ALPACA_SECRET_KEY || '';
-    if (!apiKeyId || !secretKey) {
-      throw new Error('Alpaca credentials not configured. Add them under Broker Settings or set ALPACA_API_KEY_ID / ALPACA_SECRET_KEY in .env.');
-    }
-    return new AlpacaConnector({ apiKeyId, secretKey, paper: isPaper });
+    const conn = await resolveAlpacaConnector(this.db, userId, { paper: isPaper });
+    if (!conn) throw new Error(ALPACA_CREDS_NOT_CONFIGURED_MSG);
+    return conn;
   }
 
   /**
@@ -126,7 +98,18 @@ export class TradeExecutor {
   }
 
   async execute(params: any) {
-    const { userId, symbol, side, quantity, market, mode, isPractice, stopLossPrice, takeProfitPrice, trailingStopDistance, profitTarget, leverage } = params;
+    let { userId, symbol, side, quantity, market, mode, isPractice, stopLossPrice, takeProfitPrice, trailingStopDistance, profitTarget, leverage } = params;
+
+    // HARD GATE — paper-only by default. Honors LIVE_TRADING_DISABLED env var.
+    // Default (unset OR != 'false') = paper-only. The only way to permit a live trade
+    // is to explicitly set LIVE_TRADING_DISABLED=false in .env. This is a user
+    // action, not something Jarvis/voice/orchestrator can do programmatically.
+    const liveDisabled = process.env.LIVE_TRADING_DISABLED !== 'false';
+    if (liveDisabled && isPractice !== true) {
+      console.warn(`[execute] LIVE_TRADING_DISABLED=true (default) — forcing paper for ${symbol} ${side} ${quantity}. Set LIVE_TRADING_DISABLED=false in .env to permit live trades.`);
+      isPractice = true;
+      mode = mode === 'live' ? 'practice' : mode;
+    }
 
     const assetClass = this.resolveAssetClass(market, symbol);
 

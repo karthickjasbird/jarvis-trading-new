@@ -20,7 +20,15 @@ Expected duration: 25–40 minutes (most of it waiting on you to create accounts
 
 ## --- PROMPT STARTS BELOW ---
 
-You are helping me set up the **Jarvis AI Trading Platform** on a fresh machine. I'm running this in my IDE so you have access to the cloned repository at the current working directory. Your job is to walk me through every step, run commands on my behalf, write files when needed, and verify each phase before moving on.
+You are helping me set up the **Jarvis AI Trading Platform** (v1.7.0) on a fresh machine. I'm running this in my IDE so you have access to the cloned repository at the current working directory. Your job is to walk me through every step, run commands on my behalf, write files when needed, and verify each phase before moving on.
+
+**Context you need before we start:**
+
+Jarvis (as of v1.7.0) is a **rules-based** trading platform with a free data layer and a voice assistant. It picks setups across three timeframes — **position** (Turtle 55-day breakout, weeks-to-months hold), **swing** (4H/1H breakout), and **intraday** (15m momentum + VWAP). The earlier multi-agent LLM swarm has been retired (kept behind a `USE_LEGACY_SWARM` flag for comparison). The voice assistant (Gemini Live) handles conversation but does NOT make trade decisions — those come from the rules engine.
+
+**Critical safety stance — paper trading only by default.** The `.env` ships with `LIVE_TRADING_DISABLED=true`. Every trade is paper money until the user explicitly flips this flag AND has live broker keys. The voice assistant cannot enable live trading. Do NOT suggest flipping this flag during onboarding — leave it at the default. The user can revisit it after they've watched paper trades behave for a while.
+
+**Expected monthly cost** at default settings: ~$3–$5 in Gemini API (voice only).
 
 **Ground rules for you:**
 - Do **not** invent credentials — if you need a value (API key, Firebase config field, user ID), ask me for it and wait for my answer
@@ -28,6 +36,7 @@ You are helping me set up the **Jarvis AI Trading Platform** on a fresh machine.
 - After each phase, run a verification command and report the result before moving on
 - If a step fails, stop and tell me the exact error rather than guessing or skipping
 - All files you'll create/edit are at the repo root: `.env`, `serviceAccountKey.json`, `firebase-applet-config.json`. Templates exist as `.env.example`, `serviceAccountKey.example.json`, `firebase-applet-config.example.json`
+- **Never suggest setting `LIVE_TRADING_DISABLED=false` during onboarding.** Paper mode is the correct first-run state.
 
 ---
 
@@ -103,26 +112,28 @@ cp .env.example .env
 
 Then ask me, one at a time:
 
-1. **"Paste your Gemini API key (starts with `AIzaSy...`):"** → use the Edit tool to set `GEMINI_API_KEY="<value>"` in `.env`
+1. **"Paste your Gemini API key (starts with `AIzaSy...`):"** → use the Edit tool to set `GEMINI_API_KEY="<value>"` in `.env`. Tell me this powers ONLY the voice assistant — the rules engine that picks trades is free.
 
-2. **"Do you want to set up Binance for live crypto trading now? (yes/skip)"**
-   - If yes: ask for `BINANCE_API_KEY` and `BINANCE_SECRET_KEY` separately, set them in `.env`
-   - If skip: leave blank
+2. **"Do you have an Alpaca PAPER account? (yes/skip)"** — Alpaca paper is the recommended sandbox for stocks/ETFs and is also used by the paper-bracket safety smoke test.
+   - If yes: ask for `ALPACA_API_KEY_ID` and `ALPACA_SECRET_KEY` separately. Tell me paper keys start with `PK` (auto-detected — no extra config needed).
+   - If skip: leave blank. The crypto-only path still works for paper trades.
 
-3. **"Do you want to set up Alpaca for US stocks/ETFs now? (yes/skip)"**
-   - If yes: ask for `ALPACA_API_KEY_ID` and `ALPACA_SECRET_KEY` separately
-   - If skip: leave blank
+3. **"Do you want to add Binance public API keys for live crypto data? (yes/skip)"**
+   - Tell me: this is OPTIONAL. Public Binance klines (used for scanning) work without keys. Keys are only needed if I later flip to real-money crypto trading. **For first-run, I should skip this.**
+   - If yes anyway: ask for `BINANCE_API_KEY` and `BINANCE_SECRET_KEY`, set them in `.env`.
 
 4. **"Do you want Telegram alerts? (yes/skip)"**
    - If yes: ask for `TELEGRAM_BOT_TOKEN` (from @BotFather on Telegram)
    - If skip: leave blank
 
-5. **"Do you want the Groq fallback model? (yes/skip)"**
+5. **"Do you want the Groq fallback model for voice? (yes/skip)"**
    - If yes: ask for `GROQ_API_KEY` from console.groq.com
    - If skip: leave blank
 
 Leave `OWNER_USER_ID` blank — we fill it after first login.
 Leave `APP_URL` as `http://localhost:3000`.
+Leave `LIVE_TRADING_DISABLED=true` (the safe default).
+Leave `USE_LEGACY_SWARM=false` (the rules-engine orchestrator default).
 Leave `CHROME_DEBUG_URL` blank (advanced feature, TradingView bridge).
 
 Then verify by reading `.env` and confirming `GEMINI_API_KEY` is populated. Don't print the key value to me — just confirm "Gemini key is set, length N".
@@ -244,7 +255,7 @@ Tell me to perform these visual checks in the dashboard and report back yes/no f
 - [ ] Sentry widget says "Sentry is watching, no events yet"
 - [ ] Onboarding card bottom-right shows green checkmarks for Gemini + Owner User ID
 
-If all six pass: **setup complete**. Tell me Jarvis is ready, and that I should start in Practice mode (the default — paper trading, no real money).
+If all six pass: **setup complete**. Tell me Jarvis is ready in **paper mode** (`LIVE_TRADING_DISABLED=true` is the default — every trade is paper money until I explicitly flip the flag).
 
 If any fail: tell me which, and check the most likely cause:
 - Spinner forever on Goals/Campaigns → indexes didn't finish building (wait 2 min and refresh, or re-run `firebase deploy --only firestore:indexes`)
@@ -253,12 +264,40 @@ If any fail: tell me which, and check the most likely cause:
 
 ---
 
+### Phase 9 — Paper-bracket safety smoke test (recommended)
+
+This proves the bracket placement code lands an entry + protective stop-loss leg on Alpaca paper. ONLY run this if I provided Alpaca paper keys in Phase 3.
+
+Run:
+```bash
+curl -s -X POST http://localhost:3000/api/test/place-bracket-via-alpaca-paper \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"AAPL","qty":1,"stopLossPrice":150}'
+```
+
+Expect a JSON response with BOTH `bracketResult.entryOrderId` AND `bracketResult.stopLossOrderId` set to non-null UUIDs. If either is missing or the response is an error, tell me — the safety wall is not working and I should investigate before doing anything else.
+
+If both are set, tell me to open https://app.alpaca.markets/paper/dashboard/orders and visually confirm I see two paired rows (one entry market order, one stop order) sharing the `client_order_id` prefix `jvb-debug-*`.
+
+---
+
+### Phase 10 — Try the rules engine via voice (optional)
+
+If voice is wired up, tell me to:
+1. Click the orb to start a voice session
+2. Say *"Suggest me a position trade"* — Jarvis runs the Turtle rules and reads any candidates back, or honestly says "nothing fired" if no breakouts match
+3. Say *"Make me $100 from $1000"* — Jarvis translates this 10% target into honest realistic timelines across position/swing/intraday (NEVER promises a date)
+
+These prove the rules engine and voice intents are working.
+
+---
+
 ### When done
 
 Tell me:
 1. To bookmark http://localhost:3000
-2. To read [INSTALL.md](INSTALL.md) sections **Step 8 (Configure Brokers In-App)** and **Step 9 (Verify Everything Works)** to add a Paper Trading broker config
-3. To start everything in **Practice mode** until I trust the bot enough to switch to Live
+2. To read [INSTALL.md](INSTALL.md) sections **Step 8 (Configure Brokers In-App)** and **Step 9 (Verify Everything Works)** for more verification flows
+3. That Jarvis is in **paper mode by default** (the safe state). To turn on live trading later I'd need to set `LIVE_TRADING_DISABLED=false` in `.env` AND add live broker keys. Strongly recommend not doing this until I've watched several full paper-mode trade lifecycles play out cleanly first.
 4. If I want to come back later: `npm run dev` from the repo root is all I need
 
 That's it. Don't continue past this point — wait for me to ask follow-up questions.

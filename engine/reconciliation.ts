@@ -31,6 +31,7 @@
 
 import ccxt from 'ccxt';
 import { AlpacaConnector } from './alpacaConnector.ts';
+import { resolveAlpacaCreds } from './alpacaCreds.ts';
 import {
   placeStopLossOnly,
   type BracketVenue,
@@ -182,16 +183,30 @@ async function fetchSlLegId(
 /**
  * Build an exchange handle for a broker config. Mirrors the pattern
  * used in tradeExecutor.execute() so both code paths build identically.
+ *
+ * Alpaca creds are resolved via the shared 3-source fallback
+ * (secrets/apiKeys → brokerConfigs → env) so reconciliation, the debug route,
+ * tradeExecutor, and scanner all read from the same place. Paper keys (PK*)
+ * cause this venue to be skipped: reconciliation is live-only by design
+ * (it filters trades to isPractice===false), so wiring paper keys into the
+ * live host would 401, and wiring them into the paper host would
+ * mis-treat every paper position as a live orphan.
  */
-function buildExchange(brokerConfig: any): { venue: BracketVenue | null; exchange: any } {
+async function buildExchange(
+  brokerConfig: any,
+  db: any,
+  ownerId: string,
+): Promise<{ venue: BracketVenue | null; exchange: any }> {
   if (brokerConfig.brokerName === 'alpaca') {
+    const creds = await resolveAlpacaCreds(db, ownerId);
+    if (!creds) return { venue: null, exchange: null };
+    if (!creds.apiKeyId.startsWith('AK')) {
+      console.log('[reconciliation] Alpaca creds are paper (PK*) — reconciliation is live-only; skipping alpaca venue');
+      return { venue: null, exchange: null };
+    }
     return {
       venue: 'alpaca',
-      exchange: new AlpacaConnector({
-        apiKeyId: brokerConfig.apiKey,
-        secretKey: brokerConfig.apiSecret,
-        paper: false,
-      }),
+      exchange: new AlpacaConnector({ ...creds, paper: false }),
     };
   }
   if (brokerConfig.brokerName === 'bybit') {
@@ -287,9 +302,9 @@ export async function reconcileOpenPositions(deps: {
 
   // Process each broker config (typically just one active)
   for (const brokerConfig of brokerConfigs) {
-    const { venue, exchange } = buildExchange(brokerConfig);
+    const { venue, exchange } = await buildExchange(brokerConfig, db, ownerId);
     if (!venue || !exchange) {
-      continue;  // Zerodha or unknown — defer
+      continue;  // Zerodha, unknown, paper-keyed alpaca, or unconfigured — defer
     }
     report.venuesScanned.push(venue);
 

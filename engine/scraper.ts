@@ -23,7 +23,8 @@
 
 import Parser from 'rss-parser';
 import { MemoryManager } from './memory.ts';
-import { generateTextForPurpose } from './modelRouter.ts';
+// v1.7.0 — LLM narrative generation removed. Sentiment now derived
+// deterministically from Fear & Greed + headline counts. No Gemini calls.
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -143,61 +144,30 @@ export class MarketScraper {
         console.log(`[SENTIMENT] 😱 Fear & Greed Index: ${fearGreed.value} (${fearGreed.label})`);
       }
 
-      // Step 2: AI synthesis — structured JSON output
-      const prompt = `You are a crypto market sentiment analyst. Analyze the following data and respond with ONLY valid JSON (no markdown).
-
-Crypto Fear & Greed Index: ${fearGreed ? `${fearGreed.value}/100 (${fearGreed.label})` : 'Unavailable'}
-
-Recent Headlines (${headlines.length} from ${sources.length} sources):
-${headlines.map((h, i) => `${i + 1}. ${h}`).join('\n')}
-
-Respond in this EXACT JSON format:
-{
-  "sentimentScore": <number 0-100, where 0=extreme panic, 50=neutral, 100=extreme greed>,
-  "classification": "<extreme_fear|fear|neutral|greed|extreme_greed>",
-  "narrative": "<2-3 sentence summary of overarching market sentiment and what's driving it>",
-  "drivers": ["<driver 1>", "<driver 2>", "<driver 3>"]
-}
-
-Rules:
-- The sentimentScore should be heavily influenced by Fear & Greed Index if available.
-- The classification must match the score range: 0-20=extreme_fear, 21-40=fear, 41-60=neutral, 61-80=greed, 81-100=extreme_greed.
-- Narrative should reference specific events from the headlines.
-- Drivers should be concise (3-6 words each).`;
-
-      let result: SentimentResult;
-
-      try {
-        const response = await generateTextForPurpose('sentiment', prompt);
-        const cleaned = response.replace(/```json?|```/g, '').trim();
-        const parsed = JSON.parse(cleaned);
-
-        result = {
-          sentimentScore: Math.max(0, Math.min(100, parsed.sentimentScore || 50)),
-          classification: parsed.classification || 'neutral',
-          fearGreedIndex: fearGreed?.value ?? null,
-          fearGreedLabel: fearGreed?.label ?? 'N/A',
-          narrative: parsed.narrative || 'Market sentiment data is being processed.',
-          drivers: (parsed.drivers || []).slice(0, 3),
-          sources,
-          headlineCount: headlines.length,
-          timestamp: new Date().toISOString(),
-        };
-      } catch (parseErr: any) {
-        // AI failed to produce valid JSON — build fallback from raw data
-        console.error('[SENTIMENT] AI parse failed:', parseErr.message);
-        result = {
-          sentimentScore: fearGreed?.value ?? 50,
-          classification: fearGreed?.label?.toLowerCase().replace(/\s+/g, '_') || 'neutral',
-          fearGreedIndex: fearGreed?.value ?? null,
-          fearGreedLabel: fearGreed?.label ?? 'N/A',
-          narrative: `Market sentiment based on ${headlines.length} headlines from ${sources.join(', ')}. Fear & Greed: ${fearGreed?.value ?? 'N/A'}.`,
-          drivers: ['Headlines analyzed', `${sources.length} sources`, fearGreed ? `F&G: ${fearGreed.value}` : 'No F&G data'],
-          sources,
-          headlineCount: headlines.length,
-          timestamp: new Date().toISOString(),
-        };
-      }
+      // v1.7.0 — Step 2: derive sentiment deterministically from F&G + headline
+      // counts. NO LLM. The previous narrative-generation prompt cost ~$3/month
+      // and produced text the rules engine doesn't use as input anyway.
+      const fgScore = fearGreed?.value ?? 50;
+      const classification: SentimentResult['classification'] =
+        fgScore <= 20 ? 'extreme_fear' :
+        fgScore <= 40 ? 'fear' :
+        fgScore <= 60 ? 'neutral' :
+        fgScore <= 80 ? 'greed' : 'extreme_greed';
+      const result: SentimentResult = {
+        sentimentScore: fgScore,
+        classification,
+        fearGreedIndex: fearGreed?.value ?? null,
+        fearGreedLabel: fearGreed?.label ?? 'N/A',
+        narrative: `Fear & Greed ${fgScore} (${fearGreed?.label ?? 'N/A'}). ${headlines.length} headlines from ${sources.join(', ')}.`,
+        drivers: [
+          fearGreed ? `F&G ${fgScore} (${fearGreed.label})` : 'No F&G data',
+          `${headlines.length} headlines`,
+          `${sources.length} sources`,
+        ],
+        sources,
+        headlineCount: headlines.length,
+        timestamp: new Date().toISOString(),
+      };
 
       // Step 3: Save to Firestore (for API endpoint)
       if (this.db) {

@@ -200,6 +200,42 @@ const highlightElementTool: FunctionDeclaration = {
   }
 };
 
+// v1.7.0 — multi-timeframe rules-engine suggestion
+const suggestByTimeframeTool: FunctionDeclaration = {
+  name: 'suggestByTimeframe',
+  description: 'Suggest trade setups for a specific timeframe — position (weeks–months, Turtle breakout), swing (days–2 weeks, faster breakout), or intraday (hours, momentum+VWAP). Returns top candidates with the exact rule that fired. Picks come from the rules engine, NOT LLM reasoning. If a timeframe is not yet validated (swing/intraday default off), the tool returns an explanation. Never promises returns or specific outcomes.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      kind: {
+        type: Type.STRING,
+        description: 'Which timeframe to scan.',
+        enum: ['position', 'swing', 'intraday'],
+      },
+      market: {
+        type: Type.STRING,
+        description: 'Optional asset class filter. Defaults to all enabled.',
+        enum: ['crypto', 'stocks', 'commodity', 'all'],
+      },
+    },
+    required: ['kind'],
+  },
+};
+
+// v1.7.0 — goal-to-honest-timeline translator
+const translateGoalTool: FunctionDeclaration = {
+  name: 'translateGoal',
+  description: 'Translate a profit goal ("make me $100 from $1000") into honest realistic timelines per timeframe. NEVER promises returns or specific dates. Returns the required % and what each timeframe typically delivers. Use this whenever the user asks "make me $X from $Y" or "how long for $Z profit?". The response includes caveats that you must convey honestly — never sugarcoat.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      targetUsd: { type: Type.NUMBER, description: 'The profit the user wants to make, in USD.' },
+      bankUsd: { type: Type.NUMBER, description: 'The capital the user is starting with, in USD.' },
+    },
+    required: ['targetUsd', 'bankUsd'],
+  },
+};
+
 const reviewPortfolioTool: FunctionDeclaration = {
   name: 'reviewPortfolio',
   description: 'Analyze the user\'s trading performance, win rate, and PnL. Use this when the user asks how they are doing or wants a performance review.',
@@ -704,6 +740,19 @@ If the user asks to backtest a strategy (like RSI or MACD) on historical data, u
 If the user asks to optimize a strategy or find the most profitable settings/parameters for a strategy, use the optimizeStrategy tool.
 If the user asks to update their risk management settings (like max daily loss, position size, or auto-liquidate threshold), use the updateRiskSettings tool.
 If the user asks to buy or sell, use the executeTrade tool. CRITICAL: When the user specifies a dollar profit target (e.g., "make me $10 profit"), you MUST pass it as the profitTarget parameter. When the user specifies a dollar amount to invest (e.g., "buy $5000 worth of DOGE"), you MUST pass it as the investAmount parameter.
+
+[TRADING TIMEFRAMES — v1.7.0]
+The bot operates across three timeframes, each driven by a separate rules engine (NOT by LLM reasoning). When the user asks "suggest me an intraday setup", "what swing trades look good", "any position trades", or "find me something to trade", use the suggestByTimeframe tool with kind set to position / swing / intraday.
+- position — Turtle System-2 on daily bars; weeks-to-months hold. The validated edge.
+- swing — same breakout shape on 4H/1H; days-to-2-weeks. May be disabled if not yet validated by backtest; honest about that.
+- intraday — momentum + VWAP confirmation on 15m bars; hours hold. NO scalping below 15m. May be disabled if not yet validated.
+Read picks to the user with the rule that fired ('why'). Do NOT add reasoning or "I think" on top — the rule IS the reason.
+
+[GOAL TRANSLATION]
+When the user says "make me $X from $Y" or "how long for $Z profit?", use translateGoal tool. NEVER promise a specific return by a specific date. The honest answer is a range across timeframes. If the goal is unrealistic ($100 from $50 in a day = 100% in a day), say so directly — that math doesn't exist outside scams.
+
+[PAPER-ONLY GUARD — v1.7.0]
+LIVE_TRADING_DISABLED is ON by default. Every trade you place is PAPER until the user explicitly turns it off in .env. If the user asks why a trade went to paper, explain: "Live trading is disabled in the .env config — you'd need to set LIVE_TRADING_DISABLED=false manually to enable real-money trades. I cannot do that for you."
 TRADING MODES — CRITICAL: You have two trading modes. Do NOT ask for a symbol or any extra information to switch modes.
 - SENTRY MODE: Jarvis trades and exits FULLY AUTOMATICALLY. No user approval needed. When the user says "activate sentry mode", "turn on sentry", "go autonomous", "trade automatically", or similar → call switchTradingMode with mode="sentry". Confirm: "Sentry mode activated. I'll handle everything automatically."
 - COPILOT MODE: Jarvis asks the user before placing or closing any trade. When the user says "activate copilot mode", "turn on copilot", "ask me before trading", or similar → call switchTradingMode with mode="copilot". Confirm: "Copilot mode activated. I'll check with you before doing anything."
@@ -716,7 +765,7 @@ If the user asks to start an autonomous learning loop or practice trading sessio
 - settings — broker & app settings. Sub-tabs (view): brokers (connected exchanges), apikeys (Gemini/Binance/Telegram keys), alerts (Telegram notifications), style (personality + orb look).
 - analytics — performance dashboard (win rate, P&L curve).
 - risk — Risk Manager: risk grade, exposure, daily-loss bar, risk parameters.
-- brain — Jarvis Brain: the agent swarm, market scanner, goals, campaigns, confidence, market regime, kelly stats, sentiment.
+- brain — Jarvis Brain: the rules-engine orchestrator activity, market scanner, goals, campaigns, confidence, market regime, kelly stats, sentiment.
 - memories — your core memories.
 - diary — the decision diary (every trade decision incl. vetoes).
 To navigate: call navigateApp. Examples: "open stocks" → navigateApp(destination="market", view="stocks"). "show me pending approvals" → navigateApp(destination="home", view="pending"). "open API key settings" → navigateApp(destination="settings", view="apikeys"). "take me to the brain" → navigateApp(destination="brain"). "show Apple" → navigateApp(destination="chart", symbol="AAPL").
@@ -756,7 +805,7 @@ ${morningBriefing}`;
             },
           },
           tools: [
-            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, switchTradingModeTool, getMarketPriceTool, executeTradeTool, closePositionTool, panicCloseAllTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool, studyWebsiteTool, deepStudyWebsiteTool, createTradingGoalTool, inspectSystemTool, checkMarketRegimeTool, getKellyStatsTool, queryTradeDiaryTool] }
+            { functionDeclarations: [setAlarmTool, setReminderTool, openAppTool, activateSentryModeTool, switchTradingModeTool, getMarketPriceTool, executeTradeTool, closePositionTool, panicCloseAllTool, navigateAppTool, getCurrentAppStateTool, highlightElementTool, reviewPortfolioTool, analyzeSentimentTool, getWhaleActivityTool, analyzeMarketTool, backtestStrategyTool, optimizeStrategyTool, updateRiskSettingsTool, studyWebsiteTool, deepStudyWebsiteTool, createTradingGoalTool, inspectSystemTool, checkMarketRegimeTool, getKellyStatsTool, queryTradeDiaryTool, suggestByTimeframeTool, translateGoalTool] }
           ],
           systemInstruction: systemInstruction,
           inputAudioTranscription: {},
@@ -1604,6 +1653,64 @@ ${morningBriefing}`;
                     } catch (e: any) {
                       clearPipelineAction();
                       response = { status: 'error', message: `Failed to query trade diary: ${e.message}` };
+                    }
+                  } else if (call.name === 'suggestByTimeframe') {
+                    const { kind, market } = call.args as { kind: 'position' | 'swing' | 'intraday'; market?: string };
+                    setPipelineAction('scan', `Scanning ${kind} setups...`, '#6366f1');
+                    try {
+                      const effectiveUserId = auth.currentUser?.uid;
+                      if (!effectiveUserId) throw new Error('Not logged in');
+                      const body: any = { userId: effectiveUserId, timeframe: kind };
+                      if (market === 'crypto') body.stockBasket = [];
+                      else if (market === 'stocks' || market === 'commodity') body.cryptoBasket = [];
+                      const res = await fetch('/api/orchestrator/run', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                      });
+                      const data = await res.json();
+                      clearPipelineAction(`✓ ${kind} scan done`);
+                      const picks = (data.candidates || []).slice(0, 3).map((c: any) => ({
+                        symbol: c.symbol,
+                        side: c.side,
+                        entry: c.entryPrice,
+                        stop: c.stopPrice,
+                        qty: Math.round((c.qty || 0) * 1e6) / 1e6,
+                        timeframe: c.timeframe,
+                        why: c.reason,
+                      }));
+                      response = {
+                        status: 'success',
+                        timeframe: kind,
+                        paperOnly: data.paperOnly,
+                        picks,
+                        message: picks.length === 0
+                          ? `No ${kind} setups fired right now. Tell the user honestly — no rule matched. Don't invent setups. Suggest checking back later or trying a different timeframe.`
+                          : `Found ${picks.length} ${kind} candidate(s) from the rules engine. Read them to the user verbatim with the rule that fired (the 'why'). Do not add LLM reasoning on top. All paper-only.`,
+                      };
+                    } catch (e: any) {
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to scan: ${e.message}` };
+                    }
+                  } else if (call.name === 'translateGoal') {
+                    const { targetUsd, bankUsd } = call.args as { targetUsd: number; bankUsd: number };
+                    setPipelineAction('analysis', 'Translating goal...', '#8b5cf6');
+                    try {
+                      const res = await fetch('/api/orchestrator/translate-goal', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ targetUsd, bankUsd }),
+                      });
+                      const data = await res.json();
+                      clearPipelineAction('✓ Goal translated');
+                      response = {
+                        status: 'success',
+                        ...data,
+                        message: `Convey the honest answer: target is ${(data.targetPct * 100).toFixed(0)}% of capital. Read the per-timeframe ranges verbatim. Do NOT promise a specific outcome. If caveats are present, mention them — especially small-account fee warnings.`,
+                      };
+                    } catch (e: any) {
+                      clearPipelineAction();
+                      response = { status: 'error', message: `Failed to translate goal: ${e.message}` };
                     }
                   }
 

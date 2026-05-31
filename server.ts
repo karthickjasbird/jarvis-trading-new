@@ -1495,18 +1495,103 @@ async function startServer() {
     }
   });
 
-  // --- AGENT SWARM ROUTES ---
+  // --- AGENT SWARM ROUTES (LEGACY — gated behind USE_LEGACY_SWARM=true) ---
+  // v1.7.0: replaced by the rules-engine orchestrator. The swarm code stays in
+  // the tree for the side-by-side comparison window. Default behavior routes
+  // /api/swarm/run to the orchestrator. Set USE_LEGACY_SWARM=true in .env to
+  // reach the old LLM swarm pipeline.
 
-  // Trigger the full agent pipeline
   app.post("/api/swarm/run", async (req, res) => {
     const { userId, isPractice, targetSymbol } = req.body;
     if (!userId) return res.status(400).json({ error: "userId is required" });
     try {
-      const result = await agentSwarm.runPipeline(userId, isPractice ?? true, targetSymbol, true); // ALWAYS require approval
+      if (process.env.USE_LEGACY_SWARM === 'true') {
+        const result = await agentSwarm.runPipeline(userId, isPractice ?? true, targetSymbol, true);
+        return res.json(result);
+      }
+      // Default: orchestrator
+      const { runOrchestrator } = await import('./engine/strategyOrchestrator.ts');
+      const { SCAN_PAIRS, STOCK_SCAN_PAIRS } = await import('./engine/marketScanner.ts');
+      const ta = new (await import('./engine/technicalAnalysis.ts')).TechnicalAnalysisEngine();
+      // Resolve current equity from the user's portfolio (best-effort)
+      let equityUsd = 10000;
+      try {
+        const portSnap = await db.collection('portfolios').doc(userId).get();
+        if (portSnap.exists) equityUsd = Number(portSnap.data()?.paperBalance ?? 10000);
+      } catch { /* keep default */ }
+      const result = await runOrchestrator(
+        { db, ta, ownerUserId: userId },
+        {
+          cryptoBasket: targetSymbol ? [targetSymbol.replace('/', '')] : SCAN_PAIRS,
+          stockBasket: targetSymbol ? [] : STOCK_SCAN_PAIRS,
+          equityUsd,
+        },
+      );
+      return res.json({
+        proposals: result.candidates,
+        rejected: result.rejected,
+        scannedAt: result.scannedAt,
+        paperOnly: result.paperOnly,
+        engine: 'orchestrator',
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Orchestrator-native route — same engine but explicit, supports timeframe filter
+  app.post("/api/orchestrator/run", async (req, res) => {
+    const { userId, timeframe, cryptoBasket, stockBasket, equityUsd } = req.body;
+    const uid = userId || process.env.OWNER_USER_ID;
+    if (!uid) return res.status(400).json({ error: "userId required" });
+    try {
+      const { runOrchestrator } = await import('./engine/strategyOrchestrator.ts');
+      const { SCAN_PAIRS, STOCK_SCAN_PAIRS } = await import('./engine/marketScanner.ts');
+      const ta = new (await import('./engine/technicalAnalysis.ts')).TechnicalAnalysisEngine();
+      let equity = Number(equityUsd);
+      if (!Number.isFinite(equity) || equity <= 0) {
+        try {
+          const portSnap = await db.collection('portfolios').doc(uid).get();
+          equity = Number(portSnap.exists ? portSnap.data()?.paperBalance ?? 10000 : 10000);
+        } catch { equity = 10000; }
+      }
+      const result = await runOrchestrator(
+        { db, ta, ownerUserId: uid },
+        {
+          timeframe,
+          cryptoBasket: cryptoBasket ?? SCAN_PAIRS,
+          stockBasket: stockBasket ?? STOCK_SCAN_PAIRS,
+          equityUsd: equity,
+        },
+      );
       res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
+  });
+
+  // Goal translation — pure math, used by voice "translateGoal" intent
+  app.post("/api/orchestrator/translate-goal", async (req, res) => {
+    const { targetUsd, bankUsd } = req.body;
+    const t = Number(targetUsd), b = Number(bankUsd);
+    if (!Number.isFinite(t) || !Number.isFinite(b) || b <= 0) {
+      return res.status(400).json({ error: "targetUsd and bankUsd required (positive numbers)" });
+    }
+    const pct = t / b;
+    const honest = {
+      targetPct: pct,
+      timelines: [
+        { timeframe: 'position', typicalRange: pct < 0.05 ? '1–3 weeks' : pct < 0.2 ? '1–3 months' : pct < 0.5 ? '3–6 months' : '6+ months', winRate: '~30%', notes: 'Turtle-style; few big winners pay for many small losses. Some weeks: nothing.' },
+        { timeframe: 'swing',    typicalRange: pct < 0.05 ? '3–10 days' : pct < 0.2 ? '2–6 weeks' : '2–4 months', winRate: 'TBD (Phase 2 validation)', notes: 'Faster cadence, smaller wins per trade. Edge not yet validated.' },
+        { timeframe: 'intraday', typicalRange: pct < 0.05 ? '1–3 days' : pct < 0.2 ? '1–4 weeks' : 'unlikely', winRate: 'TBD (Phase 4 validation)', notes: 'Tighter stops, more trades. Edge not yet validated; may not ship.' },
+      ],
+      caveats: [
+        'No timeframe guarantees a specific return by a specific date.',
+        pct > 0.5 ? '50%+ in a short window is extremely rare; treat as aspirational, not a plan.' : '',
+        b < 1000 ? 'Below $1,000 account, fees materially eat returns. Math gets tight.' : '',
+      ].filter(Boolean),
+    };
+    res.json(honest);
   });
 
   // Get recent brain activity feed
@@ -2485,32 +2570,12 @@ Be specific. Reference the actual numbers.`;
         return res.status(400).json({ error: "symbol, qty, stopLossPrice required" });
       }
 
-      // Resolve Alpaca creds via the same 3-source fallback chain
-      // tradeExecutor.getAlpacaConnector uses.
-      let apiKeyId = '';
-      let secretKey = '';
-      try {
-        const sec = await db.collection('users').doc(targetUserId).collection('secrets').doc('apiKeys').get();
-        if (sec.exists) {
-          const data: any = sec.data() || {};
-          apiKeyId = data.alpacaApiKeyId || '';
-          secretKey = data.alpacaSecretKey || '';
-        }
-      } catch {}
-      if (!apiKeyId || !secretKey) {
-        try {
-          const bcSnap = await db.collection('users').doc(targetUserId).collection('brokerConfigs')
-            .where('brokerName', '==', 'alpaca').limit(1).get();
-          if (!bcSnap.empty) {
-            const data: any = bcSnap.docs[0].data() || {};
-            apiKeyId = apiKeyId || data.apiKey || '';
-            secretKey = secretKey || data.apiSecret || '';
-          }
-        } catch {}
-      }
-      apiKeyId = apiKeyId || process.env.ALPACA_API_KEY_ID || '';
-      secretKey = secretKey || process.env.ALPACA_SECRET_KEY || '';
-      if (!apiKeyId || !secretKey) {
+      // Resolve creds via the shared 3-source fallback helper.
+      // paper:true is hardcoded here — this debug route physically cannot
+      // place a live trade.
+      const { resolveAlpacaConnector } = await import('./engine/alpacaCreds.ts');
+      const alpaca = await resolveAlpacaConnector(db, targetUserId, { paper: true });
+      if (!alpaca) {
         return res.status(400).json({
           error: "Alpaca paper keys not configured",
           hint: "Add them via Broker Settings UI, OR set in .env: ALPACA_API_KEY_ID=PK... and ALPACA_SECRET_KEY=...",
@@ -2521,14 +2586,6 @@ Be specific. Reference the actual numbers.`;
           ],
         });
       }
-
-      // Build paper connector — flips the paper:true flag
-      const { AlpacaConnector } = await import('./engine/alpacaConnector.ts');
-      const alpaca = new AlpacaConnector({
-        apiKeyId,
-        secretKey,
-        paper: true,  // <— THE KEY DIFFERENCE — hits paper-api.alpaca.markets
-      });
 
       // Call the bracket orchestrator
       const { placeEntryWithStopLoss } = await import('./engine/brackets.ts');

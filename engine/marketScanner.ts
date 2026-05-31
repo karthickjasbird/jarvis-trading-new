@@ -8,6 +8,7 @@
 import { generateTextForPurpose } from './modelRouter.ts';
 import { TechnicalAnalysisEngine } from './technicalAnalysis.ts';
 import { AlpacaConnector } from './alpacaConnector.ts';
+import { resolveAlpacaCreds } from './alpacaCreds.ts';
 
 // Curated Binance USDT pairs, grouped by sector. Unknown/delisted tickers are
 // silently filtered out by the 24hr ticker lookup, so a stale symbol degrades
@@ -402,47 +403,9 @@ Write a ONE-LINE trading signal (under 15 words) based on the REAL indicators. B
     return summary;
   }
 
-  /**
-   * Resolve this user's Alpaca creds. Look-up order:
-   *   1. `users/{userId}/secrets/apiKeys` (personal API keys vault)
-   *   2. `users/{userId}/brokerConfigs` with brokerName === 'alpaca'
-   *      (set via BrokerSettings; same creds power live trading)
-   *   3. `.env` fallback
-   * Returns null when nothing is configured (caller surfaces a clean error).
-   */
+  /** Thin wrapper around the shared 3-source resolver in alpacaCreds.ts. */
   private async getAlpacaCreds(userId: string): Promise<{ apiKeyId: string; secretKey: string } | null> {
-    let apiKeyId = '';
-    let secretKey = '';
-    if (userId) {
-      try {
-        const doc = await this.db
-          .collection('users').doc(userId)
-          .collection('secrets').doc('apiKeys').get();
-        if (doc.exists) {
-          const data: any = doc.data() || {};
-          apiKeyId = data.alpacaApiKeyId || '';
-          secretKey = data.alpacaSecretKey || '';
-        }
-      } catch {}
-      if (!apiKeyId || !secretKey) {
-        try {
-          const snap = await this.db
-            .collection('users').doc(userId)
-            .collection('brokerConfigs')
-            .where('brokerName', '==', 'alpaca')
-            .limit(1).get();
-          if (!snap.empty) {
-            const data: any = snap.docs[0].data() || {};
-            apiKeyId = apiKeyId || data.apiKey || '';
-            secretKey = secretKey || data.apiSecret || '';
-          }
-        } catch {}
-      }
-    }
-    apiKeyId = apiKeyId || process.env.ALPACA_API_KEY_ID || '';
-    secretKey = secretKey || process.env.ALPACA_SECRET_KEY || '';
-    if (!apiKeyId || !secretKey) return null;
-    return { apiKeyId, secretKey };
+    return resolveAlpacaCreds(this.db, userId);
   }
 
   /**

@@ -6,6 +6,16 @@ A complete, zero-to-running setup for a fresh machine. Target time: under 30 min
 
 ---
 
+## What Jarvis is (as of v1.7.0)
+
+A free-data, **rules-based** trading platform that picks setups across three timeframes — **position** (Turtle 55-day breakout, weeks-to-months hold), **swing** (4H/1H breakout, days), and **intraday** (15m momentum + VWAP). A voice assistant (Gemini Live) talks to you in natural language but does **not** make trade decisions — those come from the rules engine. The expensive multi-agent LLM swarm that earlier versions used has been retired (kept behind a feature flag for comparison).
+
+**Default safety stance — paper trading only.** `LIVE_TRADING_DISABLED=true` is the default in `.env`. Every trade Jarvis places is paper money until you explicitly flip the flag off and add real broker credentials. The voice assistant cannot enable live trading for you.
+
+**Expected monthly cost: ~$3–$5** in Gemini API for the voice interface (was ~$50 in v1.6.x when the LLM swarm was active).
+
+---
+
 ## Quick Start
 
 You'll need to create **4 accounts**, fill in **3 files**, and run **1 command**:
@@ -14,8 +24,8 @@ You'll need to create **4 accounts**, fill in **3 files**, and run **1 command**
 |---|---|---|
 | Google account | (you already have one) | Yes — for app sign-in |
 | Firebase project | console.firebase.google.com | Yes — database + auth |
-| Gemini API key | aistudio.google.com/apikey | Yes — powers all AI |
-| Groq / Binance / Alpaca / Telegram | various | Optional features |
+| Gemini API key | aistudio.google.com/apikey | Yes — powers voice only (~$3–5/mo) |
+| Alpaca paper / Binance / Groq / Telegram | various | Optional features |
 
 | File | What goes in it |
 |---|---|
@@ -189,20 +199,34 @@ Open `.env` and fill in:
 
 ```env
 OWNER_USER_ID=""                      # leave blank for now — fill after first login
-GEMINI_API_KEY="AIzaSy...your-key"    # required
+GEMINI_API_KEY="AIzaSy...your-key"    # required — for voice assistant only
 APP_URL="http://localhost:3000"       # leave as-is
 
-# All optional — leave blank if not using
+# ── Safety: paper-only by default ──
+# Default (unset OR true) = PAPER ONLY. The trade executor refuses every live
+# request and converts it to paper. To enable real-money trades you must
+# explicitly set this to false AND have valid broker keys for the live host.
+LIVE_TRADING_DISABLED=true
+
+# ── Comparison mode (optional) ──
+# v1.7.0 retires the LLM swarm. The /api/swarm/run endpoint now routes to the
+# rules-engine orchestrator. Set to 'true' to reach the legacy LLM swarm code
+# (still in the tree for side-by-side comparison; will be deleted in v1.8).
+USE_LEGACY_SWARM=false
+
+# ── Optional broker / data integrations ──
 BINANCE_API_KEY=""
 BINANCE_SECRET_KEY=""
-ALPACA_API_KEY_ID=""
+ALPACA_API_KEY_ID=""                  # PK* = paper (auto-detected), AK* = live
 ALPACA_SECRET_KEY=""
 TELEGRAM_BOT_TOKEN=""
-GROQ_API_KEY=""
+GROQ_API_KEY=""                       # Gemini fallback for voice
 CHROME_DEBUG_URL=""                   # only if using TradingView automation
 ```
 
 `OWNER_USER_ID` gets filled in Step 7 after you sign in.
+
+> **Note for paper trading:** Alpaca paper keys (starting with `PK`) are auto-detected by the system — you do NOT need to set `LIVE_TRADING_DISABLED=false`. Paper keys + paper-only flag is the safe default for first runs and is what we recommend leaving in place until you've watched several full trade lifecycles complete on paper.
 
 ---
 
@@ -272,7 +296,25 @@ Quick smoke test:
 4. **No red banners** at the top of the dashboard
 5. **Sentry** widget says "Sentry is watching, no events yet"
 
-Everything green? You're done. Try a voice command like *"Hey Jarvis, scan the market"* via the orb to confirm AI is wired up.
+Everything green? You're done. Try a voice command like *"Hey Jarvis, suggest me a position trade"* via the orb. Jarvis will scan the basket with the rules engine and read you any candidates that fire — or honestly say nothing matched.
+
+### Bonus paper-bracket smoke test
+
+Confirms the safety wall is wired correctly on Alpaca paper (places a paper $1 AAPL bracket order — won't fill outside US market hours but verifies the OTO leg attaches):
+
+```bash
+curl -s -X POST http://localhost:3000/api/test/place-bracket-via-alpaca-paper \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"AAPL","qty":1,"stopLossPrice":150}'
+```
+
+Expect a JSON response with `bracketResult.entryOrderId` AND `bracketResult.stopLossOrderId` both set. Open https://app.alpaca.markets/paper/dashboard/orders to visually confirm two paired rows.
+
+### Voice flows to try
+
+- *"Suggest me a position trade"* — runs Turtle rules on daily bars, returns top 3 candidates with the rule that fired
+- *"Make me $100 from $1000"* — Jarvis translates the 10% target into honest realistic timelines per timeframe (NEVER promises a date)
+- *"Show me the Brain"* — navigates to the JarvisBrain page where orchestrator activity is logged
 
 ---
 
