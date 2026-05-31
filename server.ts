@@ -145,6 +145,20 @@ async function startServer() {
     });
   });
 
+  // v1.7.0 — surface the safety / engine flags so the UI can show them.
+  // Read-only; no auth required (the flag values themselves are not secrets).
+  app.get("/api/system/safety", (_req, res) => {
+    res.json({
+      // Default = paper-only. The frontend uses this to render the PAPER ONLY pill.
+      liveTradingDisabled: process.env.LIVE_TRADING_DISABLED !== 'false',
+      // Default = orchestrator (rules engine). True means user opted into the legacy LLM swarm.
+      useLegacySwarm: process.env.USE_LEGACY_SWARM === 'true',
+      // For display in the brain page
+      engine: process.env.USE_LEGACY_SWARM === 'true' ? 'legacy-swarm' : 'rules-orchestrator',
+      version: 'v1.7.0',
+    });
+  });
+
   // ─── VERSION & UPDATE CHECK ────────────────────────────
   //
   // Strict semver "is remote newer?" compare. Returns true only when remote

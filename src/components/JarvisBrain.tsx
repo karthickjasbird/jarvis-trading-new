@@ -47,7 +47,7 @@ const AGENTS = [
     icon: Search,
     color: '#3b82f6',
     colorClass: 'blue',
-    description: 'Scans 20+ markets every 15 min for opportunities',
+    description: 'Scans ~50 crypto + 33 stocks via free TradingView ratings',
     gridPos: 'col-start-1 row-start-1',
   },
   {
@@ -57,17 +57,17 @@ const AGENTS = [
     icon: BarChart3,
     color: '#8b5cf6',
     colorClass: 'violet',
-    description: 'Deep RSI, MACD, EMA analysis on flagged pairs',
+    description: 'Computes RSI/MACD/ATR/Donchian locally — free, no LLM',
     gridPos: 'col-start-2 row-start-1',
   },
   {
     id: 'strategist',
     name: 'Strategist',
-    role: 'Trade Planner',
+    role: 'Rule Matcher',
     icon: Target,
     color: '#f59e0b',
     colorClass: 'amber',
-    description: 'Builds entry/exit plans with backtest validation',
+    description: 'Tests each timeframe rulebook against the data — pure math',
     gridPos: 'col-start-3 row-start-1',
   },
   {
@@ -77,27 +77,27 @@ const AGENTS = [
     icon: Shield,
     color: '#ef4444',
     colorClass: 'red',
-    description: 'VETO power — enforces risk limits on every trade',
+    description: 'Kill switch + loss cap + concurrency + paper-only enforcement',
     gridPos: 'col-start-1 row-start-2',
   },
   {
     id: 'scholar',
     name: 'Scholar',
-    role: 'Research Engine',
+    role: 'Sentiment + News',
     icon: BookOpen,
     color: '#10b981',
     colorClass: 'emerald',
-    description: 'Reads news, scrapes data, searches for alpha',
+    description: 'Fear & Greed index + news headlines (no LLM narrative)',
     gridPos: 'col-start-2 row-start-2',
   },
   {
     id: 'executor',
     name: 'Executor',
-    role: 'Trade Execution',
+    role: 'Bracket Placement',
     icon: Zap,
     color: '#06b6d4',
     colorClass: 'cyan',
-    description: 'Places orders on connected exchange accounts',
+    description: 'Places entry + native exchange-side stop-loss leg atomically',
     gridPos: 'col-start-3 row-start-2',
   },
   {
@@ -591,6 +591,27 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
   const [activity, setActivity] = useState(MOCK_ACTIVITY);
   const [swarmStatus, setSwarmStatus] = useState<'idle' | 'scanning' | 'analyzing' | 'executing'>('idle');
   const feedRef = useRef<HTMLDivElement>(null);
+
+  // v1.7.0 — system safety + strategy engine state
+  const [systemSafety, setSystemSafety] = useState<{ liveTradingDisabled: boolean; engine: string; version: string } | null>(null);
+  const [strategiesCfg, setStrategiesCfg] = useState<{
+    position: boolean;
+    swing: boolean;
+    swingTimeframe: '4h' | '1h';
+    intraday: boolean;
+  }>({ position: true, swing: false, swingTimeframe: '4h', intraday: false });
+  useEffect(() => {
+    fetch('/api/system/safety').then(r => r.json()).then(setSystemSafety).catch(() => {});
+    fetch(`/api/risk-dashboard?userId=${userId}`).then(r => r.json()).then(d => {
+      const s = d?.settings?.strategies || {};
+      setStrategiesCfg({
+        position: s.position?.enabled !== false,
+        swing: !!s.swing?.enabled,
+        swingTimeframe: s.swing?.timeframe ?? '4h',
+        intraday: !!s.intraday?.enabled,
+      });
+    }).catch(() => {});
+  }, [userId]);
 
   // Goal state
   const [goals, setGoals] = useState<any[]>([]);
@@ -1222,6 +1243,68 @@ export function JarvisBrain({ isPracticeMode, userId }: JarvisBrainProps) {
           </div>
         </div>
       )}
+
+      {/* v1.7.0 — Strategy Engine card — replaces the swarm-debate narrative with
+          a clear view of which timeframes are enabled and which engine is running. */}
+      <div id="brain-engine" style={{ position: 'relative', zIndex: 2, marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <Target className="w-4 h-4 text-indigo-400" />
+          <span className="text-sm font-semibold text-zinc-300 tracking-wide">STRATEGY ENGINE</span>
+          <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold tracking-wider ${
+            systemSafety?.engine === 'rules-orchestrator'
+              ? 'bg-indigo-500/15 border border-indigo-500/30 text-indigo-300'
+              : 'bg-amber-500/15 border border-amber-500/30 text-amber-300'
+          }`}>
+            {systemSafety?.engine === 'rules-orchestrator' ? 'RULES ENGINE' : 'LEGACY SWARM'}
+          </span>
+          {systemSafety?.liveTradingDisabled && (
+            <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-[9px] font-bold tracking-wider">
+              🔒 PAPER ONLY
+            </span>
+          )}
+          <span className="ml-auto text-[10px] text-zinc-500 font-mono">{systemSafety?.version ?? ''}</span>
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          {/* POSITION */}
+          <div className={`rounded-xl p-3 border ${strategiesCfg.position ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-zinc-800 bg-zinc-950/40 opacity-50'}`}>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] font-bold text-zinc-200 uppercase tracking-wider">Position</span>
+              <span className={`text-[9px] font-bold ${strategiesCfg.position ? 'text-emerald-400' : 'text-zinc-500'}`}>
+                {strategiesCfg.position ? 'ON' : 'OFF'}
+              </span>
+            </div>
+            <p className="text-[9px] text-zinc-500 leading-snug mb-1">Turtle 55-day breakout, daily bars</p>
+            <span className="text-[9px] text-emerald-400 font-semibold">Validated ✓</span>
+          </div>
+
+          {/* SWING */}
+          <div className={`rounded-xl p-3 border ${strategiesCfg.swing ? 'border-amber-500/30 bg-amber-500/5' : 'border-zinc-800 bg-zinc-950/40 opacity-50'}`}>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] font-bold text-zinc-200 uppercase tracking-wider">Swing</span>
+              <span className={`text-[9px] font-bold ${strategiesCfg.swing ? 'text-amber-400' : 'text-zinc-500'}`}>
+                {strategiesCfg.swing ? `ON · ${strategiesCfg.swingTimeframe}` : 'OFF'}
+              </span>
+            </div>
+            <p className="text-[9px] text-zinc-500 leading-snug mb-1">Breakout, 4h/1h bars</p>
+            <span className="text-[9px] text-amber-400 font-semibold">Backtest first</span>
+          </div>
+
+          {/* INTRADAY */}
+          <div className={`rounded-xl p-3 border ${strategiesCfg.intraday ? 'border-rose-500/30 bg-rose-500/5' : 'border-zinc-800 bg-zinc-950/40 opacity-50'}`}>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] font-bold text-zinc-200 uppercase tracking-wider">Intraday</span>
+              <span className={`text-[9px] font-bold ${strategiesCfg.intraday ? 'text-rose-400' : 'text-zinc-500'}`}>
+                {strategiesCfg.intraday ? 'ON' : 'OFF'}
+              </span>
+            </div>
+            <p className="text-[9px] text-zinc-500 leading-snug mb-1">Momentum + VWAP, 15m bars</p>
+            <span className="text-[9px] text-rose-400 font-semibold">Backtest first</span>
+          </div>
+        </div>
+        <p className="text-[9px] text-zinc-500 mt-2 leading-snug">
+          Picks come from arithmetic on free TradingView + Binance data. Voice: <code className="text-indigo-400">"suggest me a position trade"</code>. Toggle timeframes in <strong>Risk Manager → Edit Risk Parameters</strong>.
+        </p>
+      </div>
 
       {/* ─── Jarvis Confidence Widget ─── */}
       {isPracticeMode && (

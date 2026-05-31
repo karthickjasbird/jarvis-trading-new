@@ -24,6 +24,14 @@ interface RiskSettings {
   bleedConfidenceFloor?: number; // 60-100
   autoNavigateTV?: boolean;    // Auto-flip TV chart to symbol swarm is analyzing
   autoProtectOrphans?: boolean; // Phase 9 (Tier B #2): auto-place 3% SL on orphan positions discovered at boot
+  // v1.7.0 — rules-engine timeframe enables. Persisted to riskSettings; the
+  // orchestrator reads them at scan time. Swing/intraday default OFF until the
+  // user has paper-watched a few clean lifecycles.
+  strategies?: {
+    position?: { enabled?: boolean };
+    swing?: { enabled?: boolean; timeframe?: '4h' | '1h' };
+    intraday?: { enabled?: boolean };
+  };
 }
 
 interface DashboardData {
@@ -424,6 +432,104 @@ export function RiskManager({ userId }: { userId: string }) {
               className="overflow-hidden"
             >
               <form onSubmit={handleSave} className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-5 space-y-4">
+                {/* v1.7.0 — Strategy timeframes (rules engine) */}
+                <div className="border border-indigo-500/20 bg-indigo-500/5 rounded-xl p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wider">Strategy Timeframes</span>
+                    <span className="text-[9px] text-zinc-600">(rules engine — no LLM cost)</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    {/* Position — validated, default on */}
+                    <label className={`relative flex flex-col gap-1 p-3 rounded-lg border cursor-pointer transition-colors ${
+                      settings.strategies?.position?.enabled !== false
+                        ? 'border-emerald-500/40 bg-emerald-500/10'
+                        : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700'
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-zinc-200 uppercase tracking-wider">Position</span>
+                        <input
+                          type="checkbox"
+                          checked={settings.strategies?.position?.enabled !== false}
+                          onChange={e => setSettings({
+                            ...settings,
+                            strategies: { ...(settings.strategies || {}), position: { enabled: e.target.checked } },
+                          })}
+                          className="accent-emerald-500 w-3.5 h-3.5"
+                        />
+                      </div>
+                      <span className="text-[9px] text-emerald-400 font-semibold">VALIDATED ✓</span>
+                      <p className="text-[9px] text-zinc-500 leading-snug">Turtle 55-day breakout, daily bars. Weeks–months hold.</p>
+                    </label>
+
+                    {/* Swing — default off until backtest validates */}
+                    <label className={`relative flex flex-col gap-1 p-3 rounded-lg border cursor-pointer transition-colors ${
+                      settings.strategies?.swing?.enabled
+                        ? 'border-amber-500/40 bg-amber-500/10'
+                        : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700'
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-zinc-200 uppercase tracking-wider">Swing</span>
+                        <input
+                          type="checkbox"
+                          checked={!!settings.strategies?.swing?.enabled}
+                          onChange={e => setSettings({
+                            ...settings,
+                            strategies: {
+                              ...(settings.strategies || {}),
+                              swing: { enabled: e.target.checked, timeframe: settings.strategies?.swing?.timeframe ?? '4h' },
+                            },
+                          })}
+                          className="accent-amber-500 w-3.5 h-3.5"
+                        />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[9px] text-amber-400 font-semibold">UNVALIDATED</span>
+                        <select
+                          value={settings.strategies?.swing?.timeframe ?? '4h'}
+                          onChange={e => setSettings({
+                            ...settings,
+                            strategies: {
+                              ...(settings.strategies || {}),
+                              swing: { enabled: !!settings.strategies?.swing?.enabled, timeframe: e.target.value as '4h' | '1h' },
+                            },
+                          })}
+                          className="text-[9px] bg-zinc-950 border border-zinc-700 rounded px-1 py-0.5 text-zinc-300"
+                          onClick={e => e.stopPropagation()}
+                        >
+                          <option value="4h">4h</option>
+                          <option value="1h">1h</option>
+                        </select>
+                      </div>
+                      <p className="text-[9px] text-zinc-500 leading-snug">Same breakout, faster cadence. Days–2 weeks.</p>
+                    </label>
+
+                    {/* Intraday — default off, deliberately strict */}
+                    <label className={`relative flex flex-col gap-1 p-3 rounded-lg border cursor-pointer transition-colors ${
+                      settings.strategies?.intraday?.enabled
+                        ? 'border-rose-500/40 bg-rose-500/10'
+                        : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700'
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-zinc-200 uppercase tracking-wider">Intraday</span>
+                        <input
+                          type="checkbox"
+                          checked={!!settings.strategies?.intraday?.enabled}
+                          onChange={e => setSettings({
+                            ...settings,
+                            strategies: { ...(settings.strategies || {}), intraday: { enabled: e.target.checked } },
+                          })}
+                          className="accent-rose-500 w-3.5 h-3.5"
+                        />
+                      </div>
+                      <span className="text-[9px] text-rose-400 font-semibold">UNVALIDATED</span>
+                      <p className="text-[9px] text-zinc-500 leading-snug">Momentum + VWAP, 15m bars. Hours hold. No scalping.</p>
+                    </label>
+                  </div>
+                  <p className="text-[9px] text-zinc-500 mt-3 leading-snug">
+                    Validated = backtested with positive edge after fees. Unvalidated = code is there, edge not yet proven on your data. Enable only after running <code className="text-indigo-400">tsx scratch/turtle-backtest.ts --strategy swing</code> (or <code className="text-indigo-400">intraday</code>) and reviewing the metrics.
+                  </p>
+                </div>
+
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">

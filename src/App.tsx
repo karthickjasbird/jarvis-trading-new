@@ -107,6 +107,14 @@ export default function App() {
   const [appState, setAppState] = useState<'home' | 'market' | 'history' | 'settings' | 'chart' | 'analytics' | 'risk' | 'brain' | 'memories' | 'diary'>('home');
   const [textInput, setTextInput] = useState('');
   const [isPracticeMode, setIsPracticeMode] = useState(true); // Default to PRACTICE for safety
+
+  // v1.7.0 — system-level safety state (LIVE_TRADING_DISABLED env flag).
+  // Separate from isPracticeMode (user toggle) because this is enforced in
+  // the trade executor regardless of what the user clicks.
+  const [systemSafety, setSystemSafety] = useState<{ liveTradingDisabled: boolean; engine: string; version: string } | null>(null);
+  useEffect(() => {
+    fetch('/api/system/safety').then(r => r.json()).then(setSystemSafety).catch(() => {});
+  }, []);
   const [selectedChartSymbol, setSelectedChartSymbol] = useState('BINANCE:BTCUSDT');
   const [liveVisionEnabled, setLiveVisionEnabled] = useState(false);
   // Sub-tab state lifted here so voice navigation (navigateApp view) can switch them.
@@ -454,7 +462,7 @@ export default function App() {
       {/* Practice Mode Watermark */}
       <AnimatePresence>
         {isPracticeMode && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.9 }}
@@ -464,6 +472,22 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* v1.7.0 — system-level safety pill. Reflects LIVE_TRADING_DISABLED env
+          flag (NOT the user-toggleable practice mode). Always visible when the
+          flag is on; tells the user no real-money trade can leave this machine. */}
+      {systemSafety?.liveTradingDisabled && (
+        <div
+          className="absolute top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto"
+          title="LIVE_TRADING_DISABLED is set in .env — every trade is paper. Voice cannot turn this off; only manual .env edit can."
+        >
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold tracking-wider shadow-[0_0_20px_rgba(16,185,129,0.15)] backdrop-blur-md">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            🔒 PAPER ONLY
+            <span className="text-emerald-500/60 font-mono normal-case">{systemSafety.version}</span>
+          </div>
+        </div>
+      )}
 
       {/* Header Controls — 3 Collapsible Icons */}
       <div className="absolute top-0 left-0 right-0 p-4 z-20 flex items-start justify-between pointer-events-none">
